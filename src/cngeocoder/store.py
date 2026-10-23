@@ -13,7 +13,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-SCHEMA_VERSION = "1"  # 改表结构时递增，服务启动会校验
+SCHEMA_VERSION = "2"  # 改表结构时递增，服务启动会校验
 
 SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -26,7 +26,7 @@ CREATE TABLE admin (
     lat REAL,
     geom BLOB
 );
-CREATE TABLE admin_alias (alias TEXT NOT NULL, code TEXT NOT NULL);
+CREATE TABLE admin_alias (alias TEXT NOT NULL, code TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'alias');
 CREATE TABLE place (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,            -- poi | address | road
@@ -132,8 +132,8 @@ class Store:
     def iter_admins(self) -> Iterator[tuple]:
         yield from self.conn().execute("SELECT code, name, level, parent, lng, lat FROM admin")
 
-    def iter_aliases(self) -> Iterator[tuple[str, str]]:
-        yield from self.conn().execute("SELECT alias, code FROM admin_alias")
+    def iter_aliases(self) -> Iterator[tuple[str, str, str]]:
+        yield from self.conn().execute("SELECT alias, code, kind FROM admin_alias")
 
     def iter_boundaries(self) -> Iterator[tuple[str, int, bytes]]:
         yield from self.conn().execute("SELECT code, level, geom FROM admin WHERE geom IS NOT NULL")

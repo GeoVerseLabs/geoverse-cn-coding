@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from cngeocoder.admin import AdminIndex, load_admin_csvs, load_alias_csv
+from cngeocoder.admin import AdminIndex, load_admin_aliases, load_admin_csvs
 from cngeocoder.build import BuildInputs, build
 from cngeocoder.engine import Engine, Settings
 from cngeocoder.parser import AddressParser
@@ -31,7 +31,7 @@ def _square(lng, lat, half):
 
 @pytest.fixture(scope="session")
 def admin_index() -> AdminIndex:
-    return AdminIndex(load_admin_csvs(ADMIN_DIR), load_alias_csv(os.path.join(ADMIN_DIR, "aliases.csv")))
+    return AdminIndex(load_admin_csvs(ADMIN_DIR), load_admin_aliases(ADMIN_DIR))
 
 
 @pytest.fixture(scope="session")
@@ -88,7 +88,7 @@ def fixture_dir(tmp_path_factory):
 
 def _build(fixture_dir, out, boundaries: bool) -> str:
     build(BuildInputs(
-        admin_dir=ADMIN_DIR, aliases=os.path.join(ADMIN_DIR, "aliases.csv"), out=str(out),
+        admin_dir=ADMIN_DIR, out=str(out),
         places=(str(fixture_dir / "places.csv"),), roads=(str(fixture_dir / "roads.geojson"),),
         centroids=(str(fixture_dir / "centroids.csv"),),
         boundaries=(str(fixture_dir / "bounds.geojson"),) if boundaries else (),

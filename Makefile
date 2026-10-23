@@ -2,9 +2,8 @@ PY ?= python3
 DB ?= var/geocoder.db
 PLACES ?= data/sample/places.csv
 ROADS ?= data/sample/roads.geojson
-CENTROIDS ?= data/sample/centroids.csv
 
-.PHONY: install test lint data serve eval bench docker
+.PHONY: install test lint data sources serve eval bench docker
 
 install:
 	$(PY) -m pip install -e ".[dev]"
@@ -15,10 +14,15 @@ test:
 lint:
 	$(PY) -m ruff check src tests scripts
 
-# 用内置区划 + 示例数据建库；接入自有数据时覆盖 PLACES/ROADS/CENTROIDS，另可加 BOUNDARIES
+# 用内置区划（含中心点、历史别名）+ 示例 POI 建库；接入自有数据时覆盖 PLACES/ROADS，另可加 BOUNDARIES
 data:
-	cngeocoder build --places $(PLACES) --roads $(ROADS) --centroids $(CENTROIDS) \
+	cngeocoder build --places $(PLACES) --roads $(ROADS) \
 		$(if $(BOUNDARIES),--boundaries $(BOUNDARIES),) --out $(DB)
+
+# 重新生成内置补充数据（需要网络与 pip install -e ".[sources]"）
+sources:
+	$(PY) scripts/sources/areacodes.py
+	$(PY) scripts/sources/overture.py admin
 
 serve:
 	GEOCODER_DB=$(DB) cngeocoder serve --port 8000

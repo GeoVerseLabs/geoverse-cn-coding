@@ -1,12 +1,14 @@
 # 数据接入与更新
 
+各类数据的来源、许可与选用理由见 [data-sources.md](data-sources.md)。
+
 服务的效果主要取决于数据。所有数据离线清洗后写进一个 SQLite 文件（默认 `var/geocoder.db`），在线服务只读这个文件。
 
 ```bash
 cngeocoder build \
-  --admin-dir data/admin \                 # 行政区划（已内置）
+  --admin-dir data/admin \                 # 行政区划、别名、中心点（已内置，自动加载）
   --boundaries bounds/district.geojson \   # 行政区边界，可多个
-  --centroids  bounds/centroids.csv \      # 行政区中心点（没有边界时用）
+  --centroids  bounds/centroids.csv \      # 额外的中心点，覆盖内置值
   --places     poi/orders.csv poi/osm_points.geojson \
   --roads      roads/roads.geojson \
   --coordsys   wgs84 \                     # 输入坐标系，行内 coordsys 列优先
@@ -23,16 +25,19 @@ cngeocoder build \
 | `cities.csv` | `code,name,provinceCode` |
 | `areas.csv` | `code,name,cityCode,provinceCode` |
 | `streets.csv` | `code,name,areaCode,provinceCode,cityCode` |
-| `extra.csv` | `code,name,level,parent`（补充港澳台等） |
-| `aliases.csv` | `alias,code,note`（旧名、撤并、口语简称） |
+| `extra.csv` | `code,name,level,parent,source`（2023 版之后新增的现行区划、港澳台；脚本生成） |
+| `history_aliases.csv` | `alias,code,old_code,changed_year`（1,015 条历史旧名；脚本生成） |
+| `aliases.csv` | `alias,code,note`（人工维护的别名、口语简称） |
+| `centroids.csv` | `adcode,name,lng,lat,coordsys,method`（38,428 个区划中心点，ODbL；脚本生成） |
 
-更新区划时替换这些 CSV，并把撤并改名的旧称加进 `aliases.csv`（例如“莱芜市 → 370116”），老地址就还能解析。“县改区”“县级市改区”的旧称由程序自动生成，不用手工维护。
+`extra.csv` 和 `history_aliases.csv` 由 `scripts/sources/areacodes.py` 从 yescallop/areacodes（CC0）生成，县级以上区划因此更新到 2025 年，崇文区、萧山市这类旧名也能解析。`centroids.csv` 由 `scripts/sources/overture.py admin` 从 Overture Maps 生成，让只到区县或乡镇的地址也有坐标。人工别名写在 `aliases.csv`；“县改区”“县级市改区”的旧称程序会自动生成。
 
 ## 2. 行政区边界（逆地理用）
 
 GeoJSON FeatureCollection，属性里需要区划编码字段（`adcode` / `code` / `gb` / `区划代码`，6、9 或 12 位均可），几何为 Polygon / MultiPolygon。
 
 - 推荐来源：天地图行政区划服务（lbs.tianditu.gov.cn），CGCS2000 坐标，按 WGS84 导入即可；
+- 可选来源：`python scripts/sources/overture.py boundaries` 从 Overture（OSM）抽取省、地、县三级面，仅限内部判定使用（见 data-sources.md 第 5 节）；
 - 有边界时，逆地理用点落面判定行政区，建库时也会给没有编码的 POI 自动补编码；
 - 建库默认按 0.0001°（约 10 米）简化边界，`--simplify 0` 关闭；
 - 没有边界也能运行：逆地理退化为“周边要素投票 → 最近区县中心点”，结果里 `admin_source` 会标明来源。
@@ -65,7 +70,17 @@ CSV 或 GeoJSON 点要素，字段名兼容英文、中文表头和 OSM 标签�
 
 GeoJSON LineString / MultiLineString，属性 `name`（必填）、`adcode`（可选，没有时用边界补）。道路用于“只到路名”的正向结果和逆地理的最近道路。
 
-## 5. 从 OSM 导入（可选）
+## 5. 从 Overture / OSM 导入（可选）
+
+Overture 抽取脚本按范围读取，不需要下载全量数据：
+
+```bash
+pip install -e ".[sources]"
+python scripts/sources/overture.py roads  --bbox 116.0,39.6,116.8,40.2 --out var/sources/roads_bj.geojson
+python scripts/sources/overture.py places --bbox 116.0,39.6,116.8,40.2 --cjk-only --out var/sources/places_bj.csv
+```
+
+也可以直接处理 OSM 原始数据：
 
 国内 OSM 城市主干道和 POI 较全、门牌稀疏，可以作为补充。用 [osmium-tool](https://osmcode.org/osmium-tool/) 转成 GeoJSON：
 

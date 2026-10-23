@@ -82,8 +82,7 @@ def main() -> None:
     samples = gen(csv_path, args.n)
     print(f"生成 {args.n:,} 条合成数据: {time.time() - t0:.1f}s")
     t0 = time.time()
-    build(BuildInputs(admin_dir=os.path.join(ROOT, "data", "admin"),
-                      aliases=os.path.join(ROOT, "data", "admin", "aliases.csv"), out=db_path, places=(csv_path,)))
+    build(BuildInputs(admin_dir=os.path.join(ROOT, "data", "admin"), out=db_path, places=(csv_path,)))
     print(f"建库: {time.time() - t0:.1f}s, 文件 {os.path.getsize(db_path) / 1e6:.0f} MB")
 
     t0 = time.time()

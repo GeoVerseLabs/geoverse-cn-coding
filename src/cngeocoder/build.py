@@ -24,7 +24,7 @@ import shapely
 from shapely.geometry import shape
 
 from . import coords
-from .admin import Admin, AdminIndex, load_admin_csvs, load_alias_csv, native_code
+from .admin import Admin, AdminIndex, load_admin_aliases, load_admin_csvs, load_alias_csv, native_code
 from .boundary import BoundaryIndex
 from .normalize import normalize
 from .parser import AddressParser
@@ -64,7 +64,7 @@ def _pick(row: dict, key: str):
 class BuildInputs:
     admin_dir: str
     out: str
-    aliases: str | None = None
+    aliases: tuple[str, ...] = ()  # 区划目录自带 aliases.csv / history_aliases.csv 之外的别名文件
     boundaries: tuple[str, ...] = ()
     centroids: tuple[str, ...] = ()
     places: tuple[str, ...] = ()
@@ -119,13 +119,20 @@ class Builder:
         db.executescript(SCHEMA)
 
         admins = load_admin_csvs(inp.admin_dir)
-        aliases = load_alias_csv(inp.aliases) if inp.aliases else []
+        aliases = load_admin_aliases(inp.admin_dir)
+        for path in inp.aliases:
+            aliases.extend(load_alias_csv(path))
         self.by_code = {a.code: a for a in admins}
+        # 中心点优先级：显式 --centroids > 区划目录自带 centroids.csv > 边界几何中心
+        default_centroids = os.path.join(inp.admin_dir, "centroids.csv")
+        if os.path.exists(default_centroids):
+            self._load_centroids((default_centroids,))
         boundaries = self._load_boundaries(admins)
-        self._load_centroids()
+        self._load_centroids(inp.centroids)
+        self.stats["admin_with_coord"] = sum(1 for a in admins if a.lng is not None)
         db.executemany("INSERT INTO admin VALUES (?,?,?,?,?,?,?)",
                        [(a.code, a.name, a.level, a.parent, a.lng, a.lat, boundaries.get(a.code)) for a in admins])
-        db.executemany("INSERT INTO admin_alias VALUES (?,?)", aliases)
+        db.executemany("INSERT INTO admin_alias VALUES (?,?,?)", aliases)
         self.stats["admin"] = len(admins)
         self.stats["boundary"] = len(boundaries)
 
@@ -189,8 +196,8 @@ class Builder:
                 out[code] = shapely.to_wkb(geom)
         return out
 
-    def _load_centroids(self) -> None:
-        for path in self.inp.centroids:
+    def _load_centroids(self, paths: tuple[str, ...]) -> None:
+        for path in paths:
             for row in _iter_rows(path):
                 try:
                     code = native_code(_pick(row, "adcode"))

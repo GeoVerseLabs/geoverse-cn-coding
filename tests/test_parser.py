@@ -83,3 +83,21 @@ def test_noise_prefix_and_relative_tail(parser):
 def test_formatted_separates_alnum_parts(parser):
     p = parser.parse("北京朝阳望京SOHO T3 1201室")
     assert p.formatted() == "北京市朝阳区望京SOHO-T3-1201室"
+
+
+@pytest.mark.parametrize("text,code", [
+    ("浙江省杭州市萧山市", "330109"),      # 历史旧名（2001 年撤市设区），来自 history_aliases.csv
+    ("江苏省南京市江浦县", "320111"),
+    ("江苏省南通市海门市", "320614"),
+    ("新疆和田地区和康县", "653228"),      # 2024 年新设，来自 extra.csv（国家地名信息库）
+    ("重庆市两江新区", "500157"),
+])
+def test_history_aliases_and_new_divisions(parser, text, code):
+    _, p = comps(parser, text)
+    assert p.adcodes()["district"] == code
+
+
+def test_current_name_beats_history_alias(parser):
+    # “巢湖市”历史上是地级市，现为合肥市下的县级市，应解析到现行区划
+    _, p = comps(parser, "安徽省巢湖市")
+    assert p.adcodes()["district"] == "340181"

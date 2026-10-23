@@ -16,12 +16,11 @@ COPY src ./src
 RUN pip install --index-url "${PIP_INDEX_URL}" . && useradd --system --uid 10001 app
 
 COPY data ./data
-# 镜像内用“全国区划 + 示例 POI”预建一份数据，开箱即可试用；
+# 镜像内用“全国区划（含中心点、历史别名）+ 示例 POI”预建一份数据，开箱即可试用；
 # 生产环境把自建的 geocoder.db 挂载到 /data 并设置 GEOCODER_DB=/data/geocoder.db
 RUN cngeocoder build --admin-dir data/admin \
         --places data/sample/places.csv \
         --roads data/sample/roads.geojson \
-        --centroids data/sample/centroids.csv \
         --out /app/build/geocoder.db \
     && mkdir -p /data && chown app /data
 

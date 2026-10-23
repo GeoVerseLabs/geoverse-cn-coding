@@ -4,7 +4,7 @@
 按《地址解析与逆地理编码落地方案（国内 / 海外）》中的国内方案实现，并针对执行效率和部署简易性做了技术选型：
 **一个 Python 进程 + 一个 SQLite 数据文件**，不依赖 Elasticsearch、PostGIS、Redis。
 
-- 全国省 / 市 / 区县 / 乡镇四级区划词典内置，开箱即可做地址标准化；
+- 全国省 / 市 / 区县 / 乡镇四级区划词典、1,015 条历史旧名、3.8 万个区划中心点内置，开箱即可做地址标准化和区划级定位；
 - 百万级 POI 下，单线程解析 0.08 ms、门牌 0.33 ms、POI 0.54 ms、逆地理 0.33 ms；
 - 一个 Docker 镜像即可部署，私有化或离线环境把镜像和 `.db` 文件拷过去就能运行。
 
@@ -70,7 +70,7 @@ flowchart LR
 ```bash
 pip install -e ".[dev]"
 make data          # 内置区划 + 示例 POI 建库 → var/geocoder.db
-make test          # 75 个测试
+make test          # 83 个测试
 make serve         # http://127.0.0.1:8000/docs
 ```
 
@@ -170,11 +170,16 @@ docker run -d -p 8000:8000 -v $PWD/var:/data -e GEOCODER_DB=/data/geocoder.db \
 
 ## 数据
 
-数据接入、更新与发布流程见 [docs/data.md](docs/data.md)。仓库只内置：
+数据来源与许可见 [docs/data-sources.md](docs/data-sources.md)，接入、更新与发布流程见 [docs/data.md](docs/data.md)。仓库内置：
 
-- `data/admin/`：全国四级区划（统计用区划代码 2023 版，44,706 条）、别名表、港澳台省级补充；
-- `data/sample/`：30 个知名地点、5 条道路、19 个区划中心点，坐标为公开资料中的近似值（GCJ-02），**仅用于演示和测试**；
+- `data/admin/`：
+  - 全国四级区划：统计用区划代码 2023 版 44,706 条，加上国家地名信息库 2025 年新增的区县；
+  - 历史旧名 1,015 条与人工别名；
+  - 区划中心点 38,428 个（源自 Overture/OSM，ODbL；覆盖地级 332/333、区县 2,851、乡镇 85%）；
+- `data/sample/`：30 个知名地点、5 条道路，坐标为公开资料中的近似值（GCJ-02），**仅用于演示和测试**；
 - `data/eval/gold_sample.csv`：评测集格式示例。
+
+`scripts/sources/` 下的脚本可重新生成上述补充数据，并能按范围从 Overture 抽取道路、POI 和区划边界（`make sources`）。
 
 门牌级效果取决于自有数据（订单地址 + 签收坐标、司机打点等），这一点与参考方案的判断一致：效果主要取决于数据，其次才是算法。
 
@@ -197,18 +202,19 @@ cngeocoder --db var/geocoder.db eval data/eval/gold.csv --min-district-acc 0.95 
 
 ```
 src/cngeocoder/   服务代码
-data/admin/       区划词典、别名
-data/sample/      示例 POI / 道路 / 中心点
+data/admin/       区划词典、历史旧名、别名、中心点（出处见 data/README.md）
+data/sample/      示例 POI / 道路
 data/eval/        评测集示例
 docs/             技术选型、数据接入
 scripts/bench.py  性能基准
+scripts/sources/  数据源抽取与生成脚本（areacodes、Overture）
 tests/            单元与接口测试（合成数据）
 ```
 
 ## 已知限制与后续计划
 
-- 区划数据停在统计局 2023 版，需要接入民政部年度发布与省级半年发布；
-- 未内置行政区边界和真实 POI/门牌，需按 `docs/data.md` 导入合规数据；
+- 乡级区划停在统计局 2023 版（县级以上已更新到 2025），乡级还需整理省级民政部门的半年发布；
+- 未内置行政区边界和真实 POI/门牌：边界有合规要求，Overture 边界只建议内部使用；门牌需按 `docs/data.md` 导入自有数据；
 - 不做输入联想和拼音检索，需要时单独加 suggest 服务；
 - 规则解析对口语化、错别字地址召回有限，可按评测集难例接入 MGeo 做结构化与重排；
 - 数据只读，更新靠重建（百万级约 1 分钟）；需要在线写入或超过数千万条时，按选型文档升级存储层。
@@ -216,5 +222,7 @@ tests/            单元与接口测试（合成数据）
 ## 数据来源与许可
 
 - 区划代码：[modood/Administrative-divisions-of-China](https://github.com/modood/Administrative-divisions-of-China)（WTFPL），原始数据来自国家统计局统计用区划代码；
+- 县级以上区划更新与历史旧名：[yescallop/areacodes](https://github.com/yescallop/areacodes)（CC0），原始数据来自国家地名信息库、民政部；
+- 区划中心点：© OpenStreetMap contributors, Overture Maps Foundation（ODbL 1.0）；
 - 坐标转换算法为业界公开的 GCJ-02 / BD-09 近似算法；
 - 不包含、也不应导入抓取自商业图商的数据。

@@ -26,7 +26,7 @@ def cmd_build(args) -> int:
     from .build import BuildInputs, build
 
     stats = build(BuildInputs(
-        admin_dir=args.admin_dir, out=args.out, aliases=args.aliases,
+        admin_dir=args.admin_dir, out=args.out, aliases=tuple(args.aliases or ()),
         boundaries=tuple(args.boundaries or ()), centroids=tuple(args.centroids or ()),
         places=tuple(args.places or ()), roads=tuple(args.roads or ()), coordsys=args.coordsys,
         simplify=args.simplify,
@@ -40,12 +40,12 @@ def cmd_parse(args) -> int:
         eng = _engine(args)
         parser = eng.parser
     else:  # 不需要建库，直接用内置区划数据
-        from .admin import AdminIndex, load_admin_csvs, load_alias_csv
+        from .admin import AdminIndex, load_admin_aliases, load_admin_csvs
         from .parser import AddressParser
 
         admin_dir = args.admin_dir
         parser = AddressParser(AdminIndex(load_admin_csvs(admin_dir),
-                                          load_alias_csv(os.path.join(admin_dir, "aliases.csv"))))
+                                          load_admin_aliases(admin_dir)))
     for a in args.address:
         _dump(parser.parse(a, city=args.city).to_dict())
     return 0
@@ -109,9 +109,9 @@ def main(argv: list[str] | None = None) -> int:
 
     b = sub.add_parser("build", help="离线建库")
     b.add_argument("--admin-dir", default=default_admin)
-    b.add_argument("--aliases", default=None, help="区划别名 CSV（默认 <admin-dir>/aliases.csv）")
+    b.add_argument("--aliases", nargs="*", help="额外的区划别名 CSV（<admin-dir> 下的 aliases.csv、history_aliases.csv 自动加载）")
     b.add_argument("--boundaries", nargs="*", help="行政区边界 GeoJSON")
-    b.add_argument("--centroids", nargs="*", help="行政区中心点 CSV（adcode,lng,lat）")
+    b.add_argument("--centroids", nargs="*", help="额外的行政区中心点 CSV（adcode,lng,lat），覆盖 <admin-dir>/centroids.csv")
     b.add_argument("--places", nargs="*", help="POI/门牌 CSV 或 GeoJSON")
     b.add_argument("--roads", nargs="*", help="道路 GeoJSON")
     b.add_argument("--coordsys", default="wgs84", help="输入数据坐标系（行内 coordsys 列优先）")
@@ -153,9 +153,6 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_serve)
 
     args = ap.parse_args(argv)
-    if args.cmd == "build" and args.aliases is None:
-        cand = os.path.join(args.admin_dir, "aliases.csv")
-        args.aliases = cand if os.path.exists(cand) else None
     return args.func(args)
 
 

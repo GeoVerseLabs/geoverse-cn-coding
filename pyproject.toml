@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5"]
+# 抽取 Overture 等外部数据源（scripts/sources/）
+sources = ["pyarrow>=14", "fsspec>=2024.2", "aiohttp>=3.9"]
 
 [project.scripts]
 cngeocoder = "cngeocoder.cli:main"

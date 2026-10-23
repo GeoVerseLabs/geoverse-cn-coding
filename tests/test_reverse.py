@@ -33,3 +33,9 @@ def test_reverse_falls_back_to_centroid(engine_no_boundary):
 def test_reverse_nothing_far_away(engine):
     r = engine.reverse.reverse(90.0, 30.0)
     assert r["status"] == "not_found"
+
+
+def test_reverse_nationwide_centroid_fallback(engine_no_boundary):
+    r = engine_no_boundary.reverse.reverse(102.71, 25.05)  # 昆明市区，测试库里没有任何 POI
+    assert r["admin_source"] == "centroid"
+    assert r["adcode"]["city"] == "530100"

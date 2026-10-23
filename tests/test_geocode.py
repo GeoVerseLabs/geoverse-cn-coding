@@ -128,3 +128,12 @@ def test_building_detail_does_not_lower_poi_confidence(engine):
     r = best(engine, "海淀区测试大厦B座1201室")
     assert r["precision"] == "poi" and r["confidence"] >= 0.8
     assert r["formatted_address"].endswith("测试大厦B座1201室")
+
+
+def test_builtin_centroids_cover_whole_country(engine):
+    # 内置 data/admin/centroids.csv（Overture/OSM 派生）让任意区县、乡镇都能给出坐标
+    r = best(engine, "云南省普洱市孟连傣族拉祜族佤族自治县")
+    assert r["precision"] == "district" and r["confidence"] >= 0.9
+    assert r["location"]["lng"] == pytest.approx(99.59, abs=0.05)
+    r = best(engine, "广东省东莞市虎门镇")
+    assert r["precision"] == "town" and r["adcode"]["town"].startswith("441900")

@@ -49,7 +49,8 @@ _SUFFIXES = {
 # 简称后面紧跟这些字时，多半是路名/地名的一部分（“中山路”“朝阳北路”“玄武湖”），不当行政区
 _SHORT_BLOCK_NEXT = set("路街道巷弄胡同桥门里村屯港湾园苑庭府居楼厦店场站口坊寺庙塔湖江河东西南北大")
 
-KIND_WEIGHT = {"full": 1.0, "alias": 0.9, "short": 0.75, "gen": 0.6}
+# alias：人工维护的别名；hist：由历史区划变更自动生成的旧名
+KIND_WEIGHT = {"full": 1.0, "alias": 0.9, "hist": 0.7, "short": 0.75, "gen": 0.6}
 
 
 @dataclass(slots=True)
@@ -171,7 +172,7 @@ class _PyMatcher:
 
 
 class AdminIndex:
-    def __init__(self, admins: Iterable[Admin], aliases: Iterable[tuple[str, str]] = ()):
+    def __init__(self, admins: Iterable[Admin], aliases: Iterable[tuple[str, str] | tuple[str, str, str]] = ()):
         self.by_code: dict[str, Admin] = {}
         self.children: dict[str, list[str]] = defaultdict(list)
         for a in admins:
@@ -200,10 +201,12 @@ class AdminIndex:
                         old = stem + suf
                         if old not in full_names:
                             forms[old].append((a.code, "gen"))
-        for alias, code in aliases:
+        for item in aliases:
+            alias, code = item[0], item[1]
+            kind = item[2] if len(item) > 2 and item[2] in KIND_WEIGHT else "alias"
             c = native_code(code)
-            if c in self.by_code and alias:
-                forms[alias].append((c, "alias"))
+            if c in self.by_code and alias and alias not in full_names:
+                forms[alias].append((c, kind))
         # 同一个 form 下同一 code 只保留权重最高的一种
         self.forms: dict[str, list[tuple[str, str]]] = {}
         for f, lst in forms.items():
@@ -384,9 +387,13 @@ def load_admin_csvs(admin_dir: str) -> list[Admin]:
                 out.append(Admin(code=code, name=name, level=level, parent=parent))
     extra = os.path.join(admin_dir, "extra.csv")
     if os.path.exists(extra):
+        seen = {a.code for a in out}
         with open(extra, encoding="utf-8-sig", newline="") as f:
-            for row in csv.DictReader(f):
-                out.append(Admin(code=row["code"].strip(), name=row["name"].strip(), level=int(row["level"]),
+            for row in csv.DictReader(line for line in f if not _ALIAS_LINE.match(line)):
+                code = row["code"].strip()
+                if code in seen:
+                    continue
+                out.append(Admin(code=code, name=row["name"].strip(), level=int(row["level"]),
                                  parent=(row.get("parent") or "").strip() or None))
     return out
 
@@ -395,13 +402,25 @@ _ALIAS_LINE = re.compile(r"^\s*#")
 _TOWN_SUFFIX_RE = re.compile(r"(街道|镇|乡|街道办事处|苏木)$")
 
 
-def load_alias_csv(path: str) -> list[tuple[str, str]]:
+def load_alias_csv(path: str, kind: str = "alias") -> list[tuple[str, str, str]]:
     import csv
 
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = (line for line in f if not _ALIAS_LINE.match(line))
         for row in csv.DictReader(rows):
             if row.get("alias") and row.get("code"):
-                out.append((row["alias"].strip(), row["code"].strip()))
+                out.append((row["alias"].strip(), row["code"].strip(), kind))
+    return out
+
+
+def load_admin_aliases(admin_dir: str) -> list[tuple[str, str, str]]:
+    """区划目录下的人工别名（aliases.csv）和历史旧名（history_aliases.csv）。"""
+    import os
+
+    out: list[tuple[str, str, str]] = []
+    for fname, kind in (("aliases.csv", "alias"), ("history_aliases.csv", "hist")):
+        path = os.path.join(admin_dir, fname)
+        if os.path.exists(path):
+            out.extend(load_alias_csv(path, kind))
     return out
