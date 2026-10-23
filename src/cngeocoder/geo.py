@@ -25,6 +25,16 @@ def bearing(lng1: float, lat1: float, lng2: float, lat2: float) -> float:
     return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
 
 
+def destination(lng: float, lat: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
+    """从起点沿方位角走 distance_m 米后的位置（球面公式）。"""
+    d = distance_m / EARTH_RADIUS
+    b = math.radians(bearing_deg)
+    p1, l1 = math.radians(lat), math.radians(lng)
+    p2 = math.asin(math.sin(p1) * math.cos(d) + math.cos(p1) * math.sin(d) * math.cos(b))
+    l2 = l1 + math.atan2(math.sin(b) * math.sin(d) * math.cos(p1), math.cos(d) - math.sin(p1) * math.sin(p2))
+    return math.degrees(l2), math.degrees(p2)
+
+
 def direction_cn(deg: float) -> str:
     return _DIRECTIONS[int(((deg % 360) + 22.5) // 45) % 8]
 

@@ -60,3 +60,22 @@ def test_convert(client):
 def test_bad_input(client):
     assert client.get("/v1/reverse", params={"location": "abc"}).status_code == 400
     assert client.get("/v1/geocode", params={"address": "x", "coordsys": "mars"}).status_code == 400
+
+
+def test_feedback_endpoint(engine, tmp_path):
+    from cngeocoder.engine import Settings
+
+    log = tmp_path / "feedback.jsonl"
+    old = engine.settings
+    engine.settings = Settings(db_path=old.db_path, feedback_log=str(log))
+    try:
+        with TestClient(create_app(engine=engine)) as c:
+            r = c.post("/v1/feedback", json={"address": "测试路红门院子", "location": "116.300,39.958",
+                                             "coordsys": "gcj02", "source": "签收"})
+            assert r.status_code == 202
+        line = log.read_text(encoding="utf-8").strip()
+        assert "测试路红门院子" in line and '"coordsys": "wgs84"' in line
+    finally:
+        engine.settings = old
+    with TestClient(create_app(engine=engine)) as c:
+        assert c.post("/v1/feedback", json={"address": "x", "location": "116,39"}).status_code == 404

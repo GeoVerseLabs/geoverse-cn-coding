@@ -13,7 +13,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-SCHEMA_VERSION = "2"  # 改表结构时递增，服务启动会校验
+SCHEMA_VERSION = "3"  # 改表结构时递增，服务启动会校验
 
 SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -42,8 +42,12 @@ CREATE TABLE place (
     geom BLOB,                     -- 道路线 WKB（WGS84）
     weight REAL NOT NULL DEFAULT 0,
     source TEXT,
-    alias TEXT                     -- 别名/简称，'|' 分隔（北大|北京大学）
+    alias TEXT,                    -- 数据提供方给的别名，'|' 分隔（北大|北京大学）
+    abbr TEXT                      -- 建库时按简称规律生成的别名（北京工人体育场 → 工体），'|' 分隔
 );
+-- 历史确认结果：同一地址写法多次确认的坐标（签收点、人工核验、兜底审核），key 为归一化写法
+CREATE TABLE memory (key TEXT PRIMARY KEY, lng REAL NOT NULL, lat REAL NOT NULL, n INTEGER NOT NULL,
+                     spread REAL NOT NULL, adcode TEXT, sample TEXT);
 CREATE INDEX idx_place_road ON place (road, district_code);
 CREATE VIRTUAL TABLE place_fts USING fts5 (region, name, addr, content='');
 CREATE VIRTUAL TABLE place_rtree USING rtree (id, min_lng, max_lng, min_lat, max_lat);
@@ -65,6 +69,7 @@ class Place:
     lat: float
     weight: float
     alias: str | None = None
+    abbr: str | None = None
     geom: bytes | None = None
 
     @property
@@ -74,14 +79,18 @@ class Place:
             out.extend(a for a in self.alias.split("|") if a)
         return out
 
+    @property
+    def abbrs(self) -> list[str]:
+        return [a for a in (self.abbr or "").split("|") if a]
+
     @classmethod
     def from_row(cls, r: sqlite3.Row | tuple) -> Place:
         return cls(*r)
 
 
 _PLACE_COLS = "p.id, p.kind, p.name, p.road, p.road_no, p.road_no_num, p.adcode, p.district_code, " \
-              "p.address, p.lng, p.lat, p.weight, p.alias"
-_NCOLS = 13
+              "p.address, p.lng, p.lat, p.weight, p.alias, p.abbr"
+_NCOLS = 14
 
 
 def _region_clause(region: str | None) -> tuple[str, list]:
@@ -180,10 +189,22 @@ class Store:
         args.append(limit)
         return [Place.from_row(r) for r in self.conn().execute(sql, args)]
 
+    def memory(self, keys: list[str]) -> tuple | None:
+        """按归一化写法查历史确认结果，返回 (lng, lat, n, spread, adcode, key)。"""
+        c = self.conn()
+        for k in keys:
+            if not k:
+                continue
+            row = c.execute("SELECT lng, lat, n, spread, adcode, key FROM memory WHERE key = ?", (k,)).fetchone()
+            if row:
+                return row
+        return None
+
     def counts(self) -> dict[str, int]:
         c = self.conn()
         out = {k: v for k, v in c.execute("SELECT kind, COUNT(*) FROM place GROUP BY kind")}
         out["admin"] = c.execute("SELECT COUNT(*) FROM admin").fetchone()[0]
         out["admin_with_coord"] = c.execute("SELECT COUNT(*) FROM admin WHERE lng IS NOT NULL").fetchone()[0]
         out["admin_with_boundary"] = c.execute("SELECT COUNT(*) FROM admin WHERE geom IS NOT NULL").fetchone()[0]
+        out["memory"] = c.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
         return out

@@ -28,7 +28,8 @@ def cmd_build(args) -> int:
     stats = build(BuildInputs(
         admin_dir=args.admin_dir, out=args.out, aliases=tuple(args.aliases or ()),
         boundaries=tuple(args.boundaries or ()), centroids=tuple(args.centroids or ()),
-        places=tuple(args.places or ()), roads=tuple(args.roads or ()), coordsys=args.coordsys,
+        places=tuple(args.places or ()), roads=tuple(args.roads or ()), memory=tuple(args.memory or ()),
+        coordsys=args.coordsys,
         simplify=args.simplify,
     ))
     _dump(stats)
@@ -77,11 +78,15 @@ def cmd_eval(args) -> int:
     from .evaluate import evaluate
 
     eng = _engine(args)
-    rep = evaluate(eng.geocoder, args.gold, use_fallback=args.fallback)
+    rep = evaluate(eng.geocoder, args.gold, use_fallback=args.fallback, threshold=args.threshold)
     _dump(rep)
     acc = rep["admin_accuracy"].get("district")
     if args.min_district_acc and (acc is None or acc < args.min_district_acc):
         print(f"区县准确率 {acc} 低于阈值 {args.min_district_acc}", file=sys.stderr)
+        return 1
+    cw = rep["calibration"]["confident_wrong"]
+    if args.max_confident_wrong is not None and cw > args.max_confident_wrong:
+        print(f"高置信度错误 {cw} 条，超过上限 {args.max_confident_wrong}", file=sys.stderr)
         return 1
     p90 = rep["distance_m"]["p90"]
     if args.max_p90 and p90 is not None and p90 > args.max_p90:
@@ -114,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--centroids", nargs="*", help="额外的行政区中心点 CSV（adcode,lng,lat），覆盖 <admin-dir>/centroids.csv")
     b.add_argument("--places", nargs="*", help="POI/门牌 CSV 或 GeoJSON")
     b.add_argument("--roads", nargs="*", help="道路 GeoJSON")
+    b.add_argument("--memory", nargs="*", help="历史确认结果 CSV/JSONL（address,lng,lat[,coordsys,count]），含 /v1/feedback 日志")
     b.add_argument("--coordsys", default="wgs84", help="输入数据坐标系（行内 coordsys 列优先）")
     b.add_argument("--simplify", type=float, default=0.0001, help="边界简化容差（度）")
     b.add_argument("--out", default=os.environ.get("GEOCODER_DB", "var/geocoder.db"))
@@ -144,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--fallback", action="store_true", help="评测时允许调用兜底服务")
     e.add_argument("--min-district-acc", type=float, default=None)
     e.add_argument("--max-p90", type=float, default=None)
+    e.add_argument("--threshold", type=float, default=0.6, help="视为“可直接采用”的置信度阈值")
+    e.add_argument("--max-confident-wrong", type=int, default=None, help="可直接采用但错误的条数上限")
     e.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("serve", help="启动 HTTP 服务")

@@ -49,8 +49,11 @@ _SUFFIXES = {
 # 简称后面紧跟这些字时，多半是路名/地名的一部分（“中山路”“朝阳北路”“玄武湖”），不当行政区
 _SHORT_BLOCK_NEXT = set("路街道巷弄胡同桥门里村屯港湾园苑庭府居楼厦店场站口坊寺庙塔湖江河东西南北大")
 
-# alias：人工维护的别名；hist：由历史区划变更自动生成的旧名
-KIND_WEIGHT = {"full": 1.0, "alias": 0.9, "hist": 0.7, "short": 0.75, "gen": 0.6}
+# alias：人工维护的别名；hist：由历史区划变更自动生成的旧名；nick：城市口语别称（魔都、羊城）
+KIND_WEIGHT = {"full": 1.0, "alias": 0.9, "hist": 0.7, "short": 0.75, "nick": 0.75, "gen": 0.6}
+# 这些写法只在地址开头或紧跟其他行政区时才算行政区，且后面紧跟路名用字时不算
+_CONTIGUOUS_KINDS = ("short", "nick", "gen")
+_CORRECT_SUFFIXES = ("自治县", "自治州", "新区", "区", "县", "市", "旗", "州", "盟")
 
 
 @dataclass(slots=True)
@@ -131,6 +134,25 @@ class Match:
     @property
     def weight(self) -> float:
         return KIND_WEIGHT[self.kind]
+
+
+@dataclass
+class Correction:
+    """行政区名称纠错：text[start:end] 的 wrong 改为 admin.name。weak=没有上级约束、靠先验选出。"""
+
+    start: int
+    end: int
+    wrong: str
+    admin: Admin
+    weak: bool = False
+
+
+def _one_char_off(a: str, b: str, keep_tail: int) -> bool:
+    """等长、只差一个字，且差异不在后缀（区/县/市…）上。"""
+    if len(a) != len(b) or a == b:
+        return False
+    diff = [i for i, (x, y) in enumerate(zip(a, b, strict=True)) if x != y]
+    return len(diff) == 1 and diff[0] < len(a) - keep_tail
 
 
 @dataclass
@@ -216,6 +238,12 @@ class AdminIndex:
                     best[code] = kind
             self.forms[f] = list(best.items())
 
+        # 纠错索引：(长度, 末字) → 地级/县级区划
+        self._by_len_tail: dict[tuple[int, str], list[Admin]] = defaultdict(list)
+        for a in self.by_code.values():
+            if a.level in (LEVEL_CITY, LEVEL_DISTRICT) and not a.virtual:
+                self._by_len_tail[(len(a.name), a.name[-1])].append(a)
+
         if ahocorasick is not None:
             self._ac = ahocorasick.Automaton()
             for f in self.forms:
@@ -250,6 +278,54 @@ class AdminIndex:
     def chain_for(self, code: str, score: float = 1.0) -> AdminChain:
         return AdminChain(levels=self.lineage(native_code(code)), score=score)
 
+    def descendants(self, code: str, depth: int = 2) -> list[Admin]:
+        """下级区划（穿过“市辖区”等占位节点，占位节点不计层数）。"""
+        out: list[Admin] = []
+        frontier = [(code, 0)]
+        while frontier:
+            c, d = frontier.pop()
+            for k in self.children.get(c, ()):
+                a = self.by_code[k]
+                if a.virtual:
+                    frontier.append((k, d))
+                elif d + 1 <= depth:
+                    out.append(a)
+                    frontier.append((k, d + 1))
+        return out
+
+    def correct(self, text: str, chain: AdminChain | None) -> Correction | None:
+        """行政区错别字纠正（“北京市海定区”→海淀区，“江苏省苏洲市”→苏州市）。
+
+        只纠地级、县级名称（这两级名单完整、稳定），且要求：紧跟在已识别的行政区之后（或在开头）、
+        以区/县/市等后缀结尾、与候选只差一个非后缀字。有上级时只在其下级里找；没有上级时全国唯一才纠，
+        多个候选时只接受唯一一个有“直辖市/省会”先验的，并标记为弱纠错。
+        """
+        matched = chain is not None and chain.matched
+        parent = chain.finest if matched else None
+        if parent is not None and parent.level >= LEVEL_DISTRICT:
+            return None
+        pos = chain.end if matched else 0
+        rest = text[pos:]
+        pool_parent = self.descendants(parent.code) if parent is not None else None
+        for ln in range(3, 9):
+            tok = rest[:ln]
+            if len(tok) < ln:
+                break
+            suf = next((s for s in _CORRECT_SUFFIXES if tok.endswith(s)), None)
+            if suf is None or any(ch.isdigit() for ch in tok):
+                continue
+            if tok in self.forms:
+                return None  # 本身就是合法名称
+            pool = pool_parent if pool_parent is not None else self._by_len_tail.get((ln, tok[-1]), [])
+            cands = [a for a in pool if a.name.endswith(suf) and _one_char_off(a.name, tok, len(suf))]
+            if len(cands) == 1:
+                return Correction(pos, pos + ln, tok, cands[0], weak=parent is None)
+            if len(cands) > 1 and parent is None:
+                preferred = [a for a in cands if self._prior(a.code) > 0]
+                if len(preferred) == 1:
+                    return Correction(pos, pos + ln, tok, preferred[0], weak=True)
+        return None
+
     def lookup_name(self, name: str) -> list[Admin]:
         return [self.by_code[c] for c, _ in self.forms.get(name, [])]
 
@@ -276,7 +352,7 @@ class AdminIndex:
             # 简称后面紧跟另一个行政区（“深圳南山”）时不受后续字限制
             blocked = nxt in _SHORT_BLOCK_NEXT and end not in starts
             for code, kind in self.forms[form]:
-                if kind == "short" and blocked:
+                if kind in ("short", "nick") and blocked:
                     continue
                 a = self.by_code[code]
                 out.append(Match(start, end, form, code, a.level, kind))
@@ -300,7 +376,7 @@ class AdminIndex:
         best: list[tuple[float, int]] = [(float("-inf"), -1)] * n
         for i, m in enumerate(matches):
             # 作为链首：简称/推导别名必须在开头；全称允许前面有少量噪声
-            if m.kind in ("short", "gen"):
+            if m.kind in _CONTIGUOUS_KINDS:
                 head = m.weight if m.start == 0 else float("-inf")
             else:
                 head = m.weight - min(0.6, 0.04 * m.start)
@@ -312,7 +388,7 @@ class AdminIndex:
                 if best[j][0] == float("-inf"):
                     continue
                 gap = m.start - pj.end
-                if gap > 0 and m.kind in ("short", "gen"):
+                if gap > 0 and m.kind in _CONTIGUOUS_KINDS:
                     continue
                 s = best[j][0] + m.weight - min(0.8, 0.08 * gap)
                 if s > cand[0]:
@@ -419,7 +495,7 @@ def load_admin_aliases(admin_dir: str) -> list[tuple[str, str, str]]:
     import os
 
     out: list[tuple[str, str, str]] = []
-    for fname, kind in (("aliases.csv", "alias"), ("history_aliases.csv", "hist")):
+    for fname, kind in (("aliases.csv", "alias"), ("history_aliases.csv", "hist"), ("nicknames.csv", "nick")):
         path = os.path.join(admin_dir, fname)
         if os.path.exists(path):
             out.extend(load_alias_csv(path, kind))

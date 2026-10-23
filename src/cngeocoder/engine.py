@@ -26,6 +26,7 @@ class Settings:
     tianditu_daily_quota: int = 10000
     min_confidence: float = 0.6
     review_log: str | None = None
+    feedback_log: str | None = None
     cache_size: int = 20000
 
     @classmethod
@@ -38,6 +39,7 @@ class Settings:
             tianditu_daily_quota=int(env("TIANDITU_DAILY_QUOTA", cls.tianditu_daily_quota)),
             min_confidence=float(env("GEOCODER_MIN_CONFIDENCE", cls.min_confidence)),
             review_log=env("GEOCODER_REVIEW_LOG") or None,
+            feedback_log=env("GEOCODER_FEEDBACK_LOG") or None,
             cache_size=int(env("GEOCODER_CACHE_SIZE", cls.cache_size)),
         )
 

@@ -79,8 +79,13 @@ def dice(a: str, b: str) -> float:
     return 2.0 * inter / (len(ga) + len(gb))
 
 
+def is_subsequence(short: str, long: str) -> bool:
+    it = iter(long)
+    return all(ch in it for ch in short)
+
+
 def name_similarity(query: str, name: str) -> float:
-    """POI/道路名相似度：Dice 为主，包含关系给加分。"""
+    """POI/道路名相似度：Dice 为主，包含关系、按序省略（腾讯大厦 ⊂ 腾讯滨海大厦）给加分。"""
     if not query or not name:
         return 0.0
     q, n = query.upper(), name.upper()
@@ -90,4 +95,7 @@ def name_similarity(query: str, name: str) -> float:
     if q in n or n in q:
         shorter, longer = (q, n) if len(q) <= len(n) else (n, q)
         s = max(s, 0.6 + 0.35 * len(shorter) / len(longer))
+    elif len(q) >= 4 and len(q) < len(n) and is_subsequence(q, n):
+        # 口语里常省略中间的字；只认 4 字以上、全部按序出现的情况（“北京南站”不会匹配“北京西站”）
+        s = max(s, 0.45 + 0.3 * len(q) / len(n))
     return min(s, 0.99)

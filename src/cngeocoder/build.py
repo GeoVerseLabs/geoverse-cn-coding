@@ -24,8 +24,10 @@ import shapely
 from shapely.geometry import shape
 
 from . import coords
-from .admin import Admin, AdminIndex, load_admin_aliases, load_admin_csvs, load_alias_csv, native_code
+from .admin import Admin, AdminIndex, load_admin_aliases, load_admin_csvs, load_alias_csv, native_code, short_names
 from .boundary import BoundaryIndex
+from .colloquial import abbreviations
+from .geo import haversine
 from .normalize import normalize
 from .parser import AddressParser
 from .store import SCHEMA, SCHEMA_VERSION, region_tokens
@@ -69,6 +71,7 @@ class BuildInputs:
     centroids: tuple[str, ...] = ()
     places: tuple[str, ...] = ()
     roads: tuple[str, ...] = ()
+    memory: tuple[str, ...] = ()  # 历史确认结果（签收坐标、人工核验、兜底审核通过）CSV/JSONL
     coordsys: str = "wgs84"
     simplify: float = 0.0001  # 边界简化容差（度，约 10 米）
 
@@ -82,6 +85,18 @@ def _iter_geojson(path: str) -> Iterator[dict]:
 
 def _iter_rows(path: str) -> Iterator[dict]:
     """CSV 或 GeoJSON 点要素统一成 dict 行。"""
+    if path.endswith(".jsonl"):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    row = json.loads(line)
+                    loc = row.get("location")
+                    if isinstance(loc, dict):  # /v1/feedback 写出的格式
+                        row.setdefault("lng", loc.get("lng"))
+                        row.setdefault("lat", loc.get("lat"))
+                    yield row
+        return
     if path.endswith((".geojson", ".json")):
         for f in _iter_geojson(path):
             props = dict(f.get("properties") or {})
@@ -137,6 +152,7 @@ class Builder:
         self.stats["boundary"] = len(boundaries)
 
         index = AdminIndex(admins, aliases)
+        self.index = index
         self.parser = AddressParser(index)
         self.bindex = BoundaryIndex.from_wkb(
             (c, self.by_code[c].level, wkb) for c, wkb in boundaries.items()) if boundaries else None
@@ -146,6 +162,8 @@ class Builder:
             next_id = self._load_places(db, path, next_id)
         for path in inp.roads:
             next_id = self._load_roads(db, path, next_id)
+        if inp.memory:
+            self._load_memory(db, inp.memory)
 
         db.execute("INSERT INTO place_fts(place_fts) VALUES ('optimize')")
         common = self._common_tokens(db)
@@ -268,10 +286,13 @@ class Builder:
             addr_detail = parsed.detail if parsed is not None else (normalize(address) if address else "")
             aliases = [normalize(a) for a in str(_pick(row, "alias") or "").replace("；", "|").replace(";", "|").split("|")]
             alias = "|".join(a for a in aliases if a) or None
+            abbr = "|".join(a for a in abbreviations(name, self._prefixes(code)) if a not in aliases) or None \
+                if name else None
             place_rows.append((next_id, kind, name, road, road_no, road_no_num, code, district,
                                normalize(address) if address else None, lng, lat, None, weight,
-                               os.path.basename(path), alias))
-            fts_rows.append((next_id, region_tokens(code), index_text(name, *(alias or "").split("|")),
+                               os.path.basename(path), alias, abbr))
+            fts_rows.append((next_id, region_tokens(code),
+                             index_text(name, *(alias or "").split("|"), *(abbr or "").split("|")),
                              index_text(road, addr_detail)))
             rtree_rows.append((next_id, lng, lng, lat, lat))
             next_id += 1
@@ -302,7 +323,7 @@ class Builder:
             district = code[:6] if code and len(code) >= 6 else None
             place_rows.append((next_id, "road", name, name, None, None, code, district, None,
                                mid.x, mid.y, shapely.to_wkb(geom), float(_pick(props, "weight") or 0),
-                               os.path.basename(path), None))
+                               os.path.basename(path), None, None))
             fts_rows.append((next_id, region_tokens(code), index_text(name), ""))
             rtree_rows.append((next_id, minx, maxx, miny, maxy))
             next_id += 1
@@ -322,11 +343,54 @@ class Builder:
         self.stats["common_tokens"] = len(rows)
         return [r[0] for r in rows]
 
+    def _prefixes(self, code: str | None) -> tuple[str, ...]:
+        """要素所属省、市、区县的名称与简称，用于生成“去掉城市前缀”的别名。"""
+        if not code:
+            return ()
+        out: list[str] = []
+        for level, a in self.index.lineage(code).items():
+            if level <= 3:
+                out.append(a.name)
+                out.extend(short_names(a.name, level))
+        return tuple(out)
+
+    def _load_memory(self, db: sqlite3.Connection, paths: tuple[str, ...]) -> None:
+        """历史确认结果：同一写法的多次确认取中位点，离散度大的（多处签收）降低可信度。"""
+        groups: dict[str, list[tuple[float, float, float, str | None, str]]] = {}
+        for path in paths:
+            for row in _iter_rows(path):
+                address = _pick(row, "address")
+                try:
+                    lng, lat = float(_pick(row, "lng")), float(_pick(row, "lat"))
+                except (TypeError, ValueError):
+                    continue
+                if not address:
+                    continue
+                lng, lat = coords.to_wgs84(lng, lat, _pick(row, "coordsys") or self.inp.coordsys)
+                w = float(row.get("count") or row.get("n") or 1)
+                p = self.parser.parse(address, alternatives=0)
+                adcode = p.district.code if p.district else p.region_code
+                for key in p.memory_keys():
+                    groups.setdefault(key, []).append((lng, lat, w, adcode, address))
+        rows = []
+        for key, pts in groups.items():
+            lngs = sorted(x for x, _, _, _, _ in pts)
+            lats = sorted(y for _, y, _, _, _ in pts)
+            mlng, mlat = lngs[len(lngs) // 2], lats[len(lats) // 2]
+            dists = sorted(haversine(mlng, mlat, x, y) for x, y, _, _, _ in pts)
+            spread = dists[len(dists) // 2]
+            n = int(round(sum(w for _, _, w, _, _ in pts)))
+            adcodes = [a for _, _, _, a, _ in pts if a]
+            adcode = max(set(adcodes), key=adcodes.count) if adcodes else None
+            rows.append((key, mlng, mlat, n, round(spread, 1), adcode, pts[0][4]))
+        db.executemany("INSERT OR REPLACE INTO memory VALUES (?,?,?,?,?,?,?)", rows)
+        self.stats["memory"] = len(rows)
+
     @staticmethod
     def _flush(db, place_rows: list, fts_rows: list, rtree_rows: list) -> None:
         if not place_rows:
             return
-        db.executemany("INSERT INTO place VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", place_rows)
+        db.executemany("INSERT INTO place VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", place_rows)
         db.executemany("INSERT INTO place_fts(rowid, region, name, addr) VALUES (?,?,?,?)", fts_rows)
         db.executemany("INSERT INTO place_rtree VALUES (?,?,?,?,?)", rtree_rows)
         place_rows.clear()

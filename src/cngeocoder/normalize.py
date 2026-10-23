@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass, field
+
+from .colloquial import clean_colloquial, has_traditional, strip_symbols, to_simplified
 
 CN_DIGITS = {
     "零": 0, "〇": 0, "○": 0, "一": 1, "壹": 1, "幺": 1, "二": 2, "贰": 2, "两": 2,
@@ -19,7 +22,7 @@ CN_UNITS = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 10
 _CN_NUM_CHARS = "".join(CN_DIGITS) + "".join(CN_UNITS)
 
 # 只在这些量词前做中文数字转换
-_NUM_SUFFIX = "号楼|号院|号馆|号|栋|幢|座|单元|层|楼|室|弄|巷|期|段|组|排|队|区(?=\\d*号楼)"
+_NUM_SUFFIX = "号楼|号院|号馆|号|栋|幢|座|单元|层|楼|室|弄|巷|期|段|组|排|队|米|公里|千米|区(?=\\d*号楼)"
 _CN_NUM_RE = re.compile(rf"第?([{_CN_NUM_CHARS}]+)(?=(?:{_NUM_SUFFIX}))")
 
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?86-?)?1[3-9]\d{9}(?!\d)|(?<!\d)0\d{2,3}-?\d{7,8}(?!\d)")
@@ -49,11 +52,27 @@ def cn_to_int(s: str) -> int | None:
     return total + cur
 
 
+@dataclass
+class Normalized:
+    text: str
+    traditional: bool = False
+    removed: list[str] = field(default_factory=list)
+
+
 def normalize(text: str) -> str:
-    """清洗原始地址串，返回无空白、半角化的文本。"""
+    """清洗原始地址串，返回无空白、半角化、简体化的文本。"""
+    return normalize_ex(text).text
+
+
+def normalize_ex(text: str) -> Normalized:
+    """同 normalize，并报告做了哪些非标准输入处理（繁体转换、去掉的口语片段），供置信度说明使用。"""
     if not text:
-        return ""
+        return Normalized("")
     s = unicodedata.normalize("NFKC", text)
+    trad = has_traditional(s)
+    if trad:
+        s = to_simplified(s)
+    s = strip_symbols(s)
     s = _POSTCODE_RE.sub("", s)
     s = _PHONE_RE.sub(" ", s)
     s = _LABEL_RE.sub(" ", s)
@@ -61,8 +80,9 @@ def normalize(text: str) -> str:
     # “T1 1201” 这类字母数字之间的空格改成连字符，避免直接拼接成 T11201
     s = _SPACE_BETWEEN_ALNUM.sub("-", s.strip())
     s = _DROP_RE.sub("", s)
+    s, removed = clean_colloquial(s)
     s = _MULTI_DASH.sub("-", s).strip("-")
-    return s.upper()
+    return Normalized(s.upper(), trad, removed)
 
 
 def normalize_numbers(detail: str) -> str:

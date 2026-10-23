@@ -22,10 +22,16 @@
 | 路名里的地名 | “中山东路”“朝阳北路” | 简称后紧跟“路/街/东/北…”时不当行政区 |
 | 中文数字 | “人民路三段十八号”“三号楼二单元” | 只在量词前转换，“二七区”“十堰市”不受影响 |
 | 门牌写法 | “100弄5号”“甲13号”“93号院”“3-2-501” | 规则切分出 road / road_no / building / unit / room |
-| 噪声 | 收件人、手机号、“对面”“东门” | 归一化剔除，相对位置放进 `extra` |
+| 噪声 | 收件人、手机号、“麻烦送到…谢谢”“放菜鸟驿站” | 归一化剔除，删掉的片段在 `signals.removed` 里可查 |
 | 坐标系 | WGS84 / GCJ-02 / BD-09 / CGCS2000 | 内部统一 WGS84，接口用 `coordsys` 参数，只在出入口转换 |
 
 解析输出结构：`province / city / district / town / community / road / road_no / poi / building / unit / floor / room` + 各级 adcode。
+
+### 口语化与非标准写法
+
+繁体、行政区错别字（海定区）、城市别称（魔都）、简称俗称（北大、工体）、子位置（南广场、B出口）、省略写法（腾讯大厦）、方位描述（往东 500 米、XX 对面的 YY）、交叉口都有专门处理。每个结果带 `signals` 说明置信度来源；多地同名时给出 `alternatives`。业务确认过的写法可通过 `POST /v1/feedback` 回流，下次建库后直接命中。
+
+在口语化评测集上，与改动前相比：高置信度正确率 80% → 100%，负样本（数据中没有的地点）拒绝率 85.7% → 100%（样本量小，详见 [docs/colloquial.md](docs/colloquial.md)）。
 
 ## 架构
 
@@ -52,11 +58,12 @@ flowchart LR
 | 模块 | 职责 |
 |---|---|
 | `normalize.py` | 全角半角、噪声剔除、中文数字 |
+| `colloquial.py` | 繁简转换、收寄件口语清洗、简称生成 |
 | `admin.py` | 区划词典、简称/别名、AC 自动机、层级消歧 |
 | `parser.py` | 详细地址切分（乡镇、社区、道路门牌、POI、楼栋单元室） |
 | `tokenizer.py` | 中文 bigram、FTS5 查询表达式、名称相似度 |
 | `store.py` | SQLite 访问层（FTS5 全文、R*Tree 空间、按路名取门牌） |
-| `geocoder.py` | 正向：候选生成、门牌插值、打分、兜底 |
+| `geocoder.py` | 正向：候选生成、门牌插值、交叉口、变体比对、同名歧义、历史确认、置信度、兜底 |
 | `reverse.py` / `boundary.py` | 逆向：点落面、周边投票、最近道路、方位描述 |
 | `coords.py` | WGS84 / GCJ-02 / BD-09 互转 |
 | `fallback/tianditu.py` | 天地图兜底（配额、熔断） |
@@ -70,7 +77,7 @@ flowchart LR
 ```bash
 pip install -e ".[dev]"
 make data          # 内置区划 + 示例 POI 建库 → var/geocoder.db
-make test          # 83 个测试
+make test          # 107 个测试
 make serve         # http://127.0.0.1:8000/docs
 ```
 
@@ -115,6 +122,7 @@ docker run -d -p 8000:8000 -v $PWD/var:/data -e GEOCODER_DB=/data/geocoder.db \
 | `GET /v1/reverse?location=lng,lat&coordsys=&radius=&poi_limit=` | 逆地理编码 |
 | `POST /v1/reverse/batch` | 批量逆地理 |
 | `GET /v1/convert?location=&from=&to=` | 坐标系转换 |
+| `POST /v1/feedback` | 回传确认坐标 `{"address","location","coordsys","source"}`，下次建库用 `--memory` 导入（需配置 `GEOCODER_FEEDBACK_LOG`） |
 | `GET /v1/meta` · `GET /health` | 数据版本、计数、缓存与兜底状态；健康检查 |
 
 正向结果示例（示例数据，`coordsys=gcj02`）：
@@ -167,6 +175,7 @@ docker run -d -p 8000:8000 -v $PWD/var:/data -e GEOCODER_DB=/data/geocoder.db \
 | `GEOCODER_MIN_CONFIDENCE` | 0.6 | 低于该置信度才考虑兜底 |
 | `GEOCODER_REVIEW_LOG` | 空 | 兜底结果写入的待审核 JSONL |
 | `GEOCODER_CACHE_SIZE` | 20000 | 进程内 LRU 缓存条数 |
+| `GEOCODER_FEEDBACK_LOG` | 空 | `/v1/feedback` 写入的 JSONL，建库时 `--memory` 导入 |
 
 ## 数据
 

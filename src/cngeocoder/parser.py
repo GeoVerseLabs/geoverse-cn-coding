@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 
 from .admin import LEVEL_CITY, LEVEL_DISTRICT, LEVEL_PROVINCE, LEVEL_TOWN, Admin, AdminChain, AdminIndex
-from .normalize import normalize, normalize_numbers
+from .normalize import normalize_ex, normalize_numbers
 
 _CJK = "一-龥"
 
@@ -35,12 +35,22 @@ _CROSS_RE = re.compile(rf"^(?:与|和|交)(?P<road2>[{_CJK}A-Z0-9]{{1,12}}?(?:{_
 _DASH_TAIL_RE = re.compile(r"(?P<b>\d+)-(?P<u>\d+)-(?P<r>\d+)(?:室|号)?$")
 _DASH2_TAIL_RE = re.compile(r"(?P<b>\d+)-(?P<r>\d{3,})(?:室|号)?$")
 _TAIL_RE = re.compile(
-    r"(?P<building>(?:[A-Z]?\d+[A-Z]?|[A-Z])(?:号楼|栋|幢|座|号馆)|T\d+|\d+号(?=-?\d+单元))?"
+    r"(?P<building>(?:[A-Z]?\d+[A-Z]?|[A-Z])(?:号楼|栋|幢|座|号馆|塔)|T\d+|塔[A-Z0-9]+|\d+号(?=-?\d+单元))?"
     r"-?(?P<unit>\d+单元)?"
     r"-?(?P<floor>(?:-?\d+|B\d+|[A-Z]\d*)(?:层|F|楼(?![\d栋座])))?"
     r"-?(?P<room>[A-Z]?\d+[A-Z]?(?:室|房间|房|户|号房)?)?$"
 )
-_RELATIVE_RE = re.compile(r"(附近|旁边|旁|对面|斜对面|隔壁|周边|往[东西南北]\d*米?|[东西南北]侧\d*米?|\d+米处?)$")
+# 方位描述：位移（往东 500 米）、附近、对面、在内
+_BEARING = {"东": 90, "西": 270, "南": 180, "北": 0, "东南": 135, "东北": 45, "西南": 225, "西北": 315}
+_OFFSET_RE = re.compile(r"(?:往|向|朝)?(东南|东北|西南|西北|东|西|南|北)(?:方向|侧|边|面)?(?:约|大约|大概)?"
+                        r"(\d+(?:\.\d+)?)(米|M|公里|千米|KM)(?:处|左右|的地方)?$")
+_RELATION_RES = [
+    ("opposite", re.compile(r"(马路对面|斜对面|正对面|对面|对过)$")),
+    ("near", re.compile(r"(附近|旁边|边上|旁|周边|周围|一带|那边|这边|那里|这里|隔壁)$")),
+    ("at", re.compile(r"(里面|里头|院内|楼下|门口)$")),
+]
+# “X 对面的 Y”：X 是参照物，Y 是要找的地方
+_ANCHOR_TARGET_RE = re.compile(r"^(?P<anchor>.{2,}?)(?P<rel>马路对面|斜对面|对面|附近|旁边|边上|隔壁|楼下|里面|里)的(?P<target>.{2,})$")
 _GATE_RE = re.compile(r"([东西南北]门|正门|侧门|后门|\d+号门)$")
 _NO_ONLY_RE = re.compile(r"^(?P<no>[甲乙丙丁]?\d+(?:-\d+)?)(?P<nosuf>号院|号)$")
 
@@ -63,6 +73,13 @@ class ParsedAddress:
     extra: list[str] = field(default_factory=list)
     detail: str = ""
     alternatives: list[ParsedAddress] = field(default_factory=list)
+    # 非标准输入的结构化信息
+    relation: dict | None = None          # {"type": offset|near|opposite|at, "bearing", "distance_m", "text"}
+    cross_road: str | None = None         # 交叉口的另一条路
+    near_target: str | None = None        # “X 对面的 Y”中的 Y（X 作为 poi/road 参照）
+    corrections: list[dict] = field(default_factory=list)
+    traditional: bool = False
+    removed: list[str] = field(default_factory=list)
 
     # ----------------------------------------------------------- 行政区便捷属性
     def _admin(self, level: int) -> Admin | None:
@@ -112,6 +129,8 @@ class ParsedAddress:
     @property
     def target_level(self) -> str:
         """可定位的最细层级：楼栋/单元/室挂在门牌或 POI 上，坐标只能落到它们。"""
+        if self.road and self.cross_road and not self.road_no:
+            return "intersection"
         if self.road_no:
             return "door"
         if self.poi:
@@ -181,6 +200,12 @@ class ParsedAddress:
         """楼栋/单元/楼层/室；字母数字相邻时用“-”隔开（T3-1201室）。"""
         return join_parts([self.building, self.unit, self.floor, self.room])
 
+    def memory_keys(self) -> list[str]:
+        """历史确认结果的查询键：归一化原文 + 标准化写法（方位描述单独带上，避免“北京站对面”污染“北京站”）。"""
+        suffix = "".join("|" + v for v in ((self.relation or {}).get("text"), self.near_target, self.cross_road) if v)
+        keys = [self.normalized, self.formatted() + suffix]
+        return [k for k in dict.fromkeys(keys) if k]
+
     def to_dict(self) -> dict:
         return {
             "normalized": self.normalized,
@@ -190,6 +215,12 @@ class ParsedAddress:
             "level": self.finest_level,
             "admin_score": round(self.admin_score, 3),
             "extra": self.extra,
+            "relation": self.relation,
+            "cross_road": self.cross_road,
+            "near_target": self.near_target,
+            "corrections": self.corrections,
+            "traditional": self.traditional,
+            "removed": self.removed,
         }
 
 
@@ -210,13 +241,27 @@ class AddressParser:
         self.road_lexicon = road_lexicon or set()
 
     def parse(self, text: str, city: str | None = None, alternatives: int = 2) -> ParsedAddress:
-        norm = normalize(text)
+        n = normalize_ex(text)
+        norm = n.text
         chains = self.admin.resolve(norm, hint=city, top=1 + alternatives)
+        # 行政区错别字：在已识别的上级之下找只差一个字的名称，改正后重新解析（最多两处）
+        corrections: list[dict] = []
+        for _ in range(2):
+            fix = self.admin.correct(norm, chains[0] if chains else None)
+            if fix is None:
+                break
+            norm = norm[: fix.start] + fix.admin.name + norm[fix.end:]
+            corrections.append({"from": fix.wrong, "to": fix.admin.name, "adcode": fix.admin.adcode, "weak": fix.weak})
+            chains = self.admin.resolve(norm, hint=city, top=1 + alternatives)
         if not chains:
-            p = self._parse_detail(text, norm, None, norm)
-            return p
-        main = self._from_chain(text, norm, chains[0])
-        main.alternatives = [self._from_chain(text, norm, c) for c in chains[1:]]
+            main = self._parse_detail(text, norm, None, norm)
+        else:
+            main = self._from_chain(text, norm, chains[0])
+            main.alternatives = [self._from_chain(text, norm, c) for c in chains[1:]]
+        for p in [main, *main.alternatives]:
+            p.corrections, p.traditional, p.removed = corrections, n.traditional, n.removed
+            if p.chain is not None and corrections:
+                p.chain.score -= sum(0.25 if c["weak"] else 0.1 for c in corrections)
         return main
 
     # ----------------------------------------------------------------- 内部
@@ -270,13 +315,7 @@ class AddressParser:
         s = normalize_numbers(rest)
         p.detail = s
 
-        # 尾部的相对位置描述（“附近”“对面”“东侧 50 米”）不参与匹配
-        while True:
-            m = _RELATIVE_RE.search(s)
-            if not m or m.start() == 0:
-                break
-            p.extra.insert(0, m.group())
-            s = s[: m.start()]
+        s = self._parse_relation(p, s)
 
         # 1. 乡镇街道（若行政区链里已有则跳过）
         m = _TOWN_RE.match(s)
@@ -307,6 +346,7 @@ class AddressParser:
             s = s[m.end():]
             cm = _CROSS_RE.match(s)
             if cm:
+                p.cross_road = cm.group("road2")
                 p.extra.append("与" + cm.group("road2") + "交叉口")
                 s = s[cm.end():]
             nm = _NO_RE.match(s)
@@ -341,6 +381,37 @@ class AddressParser:
         elif pre:
             p.poi = pre
         return p
+
+    @staticmethod
+    def _parse_relation(p: ParsedAddress, s: str) -> str:
+        """剥离方位描述，结构化后放进 p.relation（原文同时留在 extra 里）。"""
+        m = _ANCHOR_TARGET_RE.match(s)
+        if m and not re.search(rf"(?:{_ROAD_SUFFIX})$", m.group("target")):
+            rel = m.group("rel")
+            kind = "opposite" if "对" in rel else ("at" if rel in ("楼下", "里面", "里") else "near")
+            p.relation = {"type": kind, "text": rel}
+            p.near_target = m.group("target")
+            p.extra.append(rel + "的" + m.group("target"))
+            s = m.group("anchor")
+        for _ in range(3):
+            m = _OFFSET_RE.search(s)
+            if m and m.start() >= 2:
+                dist = float(m.group(2)) * (1000 if m.group(3) in ("公里", "千米", "KM") else 1)
+                p.relation = {"type": "offset", "bearing": _BEARING[m.group(1)], "distance_m": dist, "text": m.group()}
+                p.extra.insert(0, m.group())
+                s = s[: m.start()]
+                continue
+            for kind, rx in _RELATION_RES:
+                m = rx.search(s)
+                if m and m.start() >= 2:
+                    if p.relation is None:
+                        p.relation = {"type": kind, "text": m.group()}
+                    p.extra.insert(0, m.group())
+                    s = s[: m.start()]
+                    break
+            else:
+                break
+        return s
 
     @staticmethod
     def _accept_community(p: ParsedAddress, chain: AdminChain | None, name: str, after: str) -> bool:

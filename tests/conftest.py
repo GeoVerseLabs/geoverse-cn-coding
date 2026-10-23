@@ -59,6 +59,12 @@ def fixture_dir(tmp_path_factory):
         # GCJ-02 输入，建库时转 WGS84
         {"name": "火星坐标点", "kind": "poi", "address": "北京市东城区火星路1号", "lng": 116.40, "lat": 39.91,
          "coordsys": "gcj02"},
+        # 口语化测试：测试大厦马路对面（路西约 120 米）的便利店；另一城市的同名“星光广场”；用来生成简称的体育场
+        {"name": "星光便利店", "kind": "poi", "address": "北京市海淀区测试路西侧", "lng": ROAD_LNG - 0.0012,
+         "lat": ROAD_LAT0 + 21 * STEP, "adcode": "110108"},
+        {"name": "星光广场", "kind": "poi", "address": "上海市浦东新区星光路2号", "lng": 121.52, "lat": 31.22},
+        {"name": "北京晨光体育场", "kind": "poi", "address": "北京市海淀区晨光路1号", "lng": 116.32, "lat": 39.96,
+         "adcode": "110108"},
     ]
     places = d / "places.csv"
     with open(places, "w", encoding="utf-8", newline="") as f:
@@ -71,6 +77,10 @@ def fixture_dir(tmp_path_factory):
     roads = {"type": "FeatureCollection", "features": [
         {"type": "Feature", "properties": {"name": "测试路", "adcode": "110108"},
          "geometry": {"type": "LineString", "coordinates": [[ROAD_LNG, ROAD_LAT0], [ROAD_LNG, ROAD_LAT0 + 0.011]]}},
+        # 与测试路在 (ROAD_LNG, ROAD_LAT0 + 0.005) 相交
+        {"type": "Feature", "properties": {"name": "交叉路", "adcode": "110108"},
+         "geometry": {"type": "LineString", "coordinates": [[ROAD_LNG - 0.005, ROAD_LAT0 + 0.005],
+                                                            [ROAD_LNG + 0.005, ROAD_LAT0 + 0.005]]}},
     ]}
     (d / "roads.geojson").write_text(json.dumps(roads, ensure_ascii=False), encoding="utf-8")
 
@@ -80,6 +90,14 @@ def fixture_dir(tmp_path_factory):
         {"type": "Feature", "properties": {"adcode": "110105"}, "geometry": _square(116.47, 39.92, 0.05)},
     ]}
     (d / "bounds.geojson").write_text(json.dumps(bounds), encoding="utf-8")
+
+    # 历史确认结果：同一口语写法被确认 3 次（CSV），以及 /v1/feedback 日志格式（JSONL）
+    with open(d / "memory.csv", "w", encoding="utf-8") as f:
+        f.write("address,lng,lat,count\n")
+        f.write(f"北京市海淀区测试路那个红色大门的院子,{ROAD_LNG + 0.0005},{ROAD_LAT0 + 0.0081},3\n")
+    (d / "feedback.jsonl").write_text(
+        json.dumps({"address": "海淀区测试大厦后面的停车场", "location": {"lng": ROAD_LNG + 0.0003, "lat": ROAD_LAT0 + 0.0025},
+                    "coordsys": "wgs84"}, ensure_ascii=False) + "\n", encoding="utf-8")
 
     with open(d / "centroids.csv", "w", encoding="utf-8") as f:
         f.write("adcode,lng,lat\n110000,116.39,39.90\n220104,125.29,43.83\n110101,116.41,39.93\n")
@@ -91,6 +109,7 @@ def _build(fixture_dir, out, boundaries: bool) -> str:
         admin_dir=ADMIN_DIR, out=str(out),
         places=(str(fixture_dir / "places.csv"),), roads=(str(fixture_dir / "roads.geojson"),),
         centroids=(str(fixture_dir / "centroids.csv"),),
+        memory=(str(fixture_dir / "memory.csv"), str(fixture_dir / "feedback.jsonl")),
         boundaries=(str(fixture_dir / "bounds.geojson"),) if boundaries else (),
     ))
     return str(out)

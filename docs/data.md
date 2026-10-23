@@ -107,6 +107,18 @@ OSM 数据为 ODbL 许可，对外提供服务时需要署名。
 
 人工审核通过的记录整理成 POI CSV（`address,lng,lat,adcode`）加入下一次建库，本地命中率会随业务持续提高。
 
+### 历史确认结果
+
+签收坐标、人工核验等“这个写法确认在哪”的记录，用 `--memory` 导入，口语化写法再来时直接命中：
+
+```bash
+cngeocoder build ... --memory var/feedback.jsonl data/confirmed.csv
+```
+
+- CSV 字段 `address,lng,lat[,coordsys,count]`；JSONL 为 `/v1/feedback` 的输出格式；
+- 同一写法多次确认取中位点，离散度超过 300 m 的不采用。规则详见 [colloquial.md](colloquial.md) 第 3 节；
+- 入库前去掉收件人、电话等个人信息，只保留地址文本和坐标。
+
 ## 7. 发布流程
 
 1. 建到新文件：`cngeocoder build ... --out var/geocoder.next.db`（写临时文件，完成后原子改名）；

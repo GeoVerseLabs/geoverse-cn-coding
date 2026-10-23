@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -18,6 +21,7 @@ from .engine import Engine, Settings
 
 log = logging.getLogger(__name__)
 MAX_BATCH = 1000
+_feedback_lock = threading.Lock()
 
 
 def _cs(value: str | None) -> coords.CoordSys:
@@ -62,6 +66,13 @@ class GeocodeBatch(BaseModel):
     items: list[GeocodeItem] = Field(..., max_length=MAX_BATCH)
     coordsys: str | None = None
     limit: int = Field(1, ge=1, le=10)
+
+
+class Feedback(BaseModel):
+    address: str = Field(..., min_length=1, max_length=500)
+    location: str = Field(..., description="确认后的坐标 '经度,纬度'")
+    coordsys: str | None = None
+    source: str | None = Field(None, max_length=50, description="确认来源：签收、人工核验等")
 
 
 class ReverseItem(BaseModel):
@@ -142,6 +153,21 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
             lng, lat = coords.to_wgs84(*_location(it.location), cs)
             out.append({"id": it.id, **_out(rv.reverse(lng, lat, body.radius, body.poi_limit), cs)})
         return {"coordsys": cs.value, "count": len(out), "items": out}
+
+    @app.post("/v1/feedback", status_code=202)
+    def feedback(body: Feedback) -> dict:
+        """记录一条“地址写法 → 确认坐标”（签收点、人工核验）。下次建库时用 --memory 导入，
+        同样的口语化写法再来时直接命中确认结果。只追加日志，不改在线数据。"""
+        path = eng().settings.feedback_log
+        if not path:
+            raise HTTPException(404, "未配置 GEOCODER_FEEDBACK_LOG，反馈功能未开启")
+        cs = _cs(body.coordsys)
+        lng, lat = coords.to_wgs84(*_location(body.location), cs)
+        line = json.dumps({"address": body.address, "lng": round(lng, 7), "lat": round(lat, 7), "coordsys": "wgs84",
+                           "source": body.source, "ts": int(time.time())}, ensure_ascii=False)
+        with _feedback_lock, open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        return {"status": "accepted"}
 
     @app.get("/v1/convert")
     def convert(location: str, src: str = Query("wgs84", alias="from"), dst: str = Query("gcj02", alias="to")) -> dict:
