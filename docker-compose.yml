@@ -1,0 +1,21 @@
+# 一键启动：docker compose up -d --build
+# 使用自有数据：先在宿主机执行 make data 生成 ./var/geocoder.db，再取消下面 volumes 和 GEOCODER_DB 的注释。
+services:
+  geocoder:
+    build:
+      context: .
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: geoverse/cngeocoder:0.1.0
+    ports:
+      - "8000:8000"
+    environment:
+      WORKERS: "2"                      # 每个 worker 约 100 MB 内存
+      TIANDITU_TK: ${TIANDITU_TK:-}     # 填写后开启天地图兜底
+      TIANDITU_DAILY_QUOTA: "10000"
+      GEOCODER_MIN_CONFIDENCE: "0.6"
+      # GEOCODER_DB: /data/geocoder.db
+      # GEOCODER_REVIEW_LOG: /data/review.jsonl
+    # volumes:
+    #   - ./var:/data
+    restart: unless-stopped

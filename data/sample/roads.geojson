@@ -1,0 +1,16 @@
+{
+  "type": "FeatureCollection",
+  "name": "示例道路（GCJ-02 近似折线，仅用于演示）",
+  "features": [
+    {"type": "Feature", "properties": {"name": "东长安街", "adcode": "110101", "coordsys": "gcj02"},
+     "geometry": {"type": "LineString", "coordinates": [[116.3975, 39.9087], [116.4110, 39.9086], [116.4352, 39.9083]]}},
+    {"type": "Feature", "properties": {"name": "西长安街", "adcode": "110102", "coordsys": "gcj02"},
+     "geometry": {"type": "LineString", "coordinates": [[116.3580, 39.9070], [116.3780, 39.9078], [116.3975, 39.9087]]}},
+    {"type": "Feature", "properties": {"name": "建国门外大街", "adcode": "110105", "coordsys": "gcj02"},
+     "geometry": {"type": "LineString", "coordinates": [[116.4352, 39.9083], [116.4480, 39.9085], [116.4600, 39.9088]]}},
+    {"type": "Feature", "properties": {"name": "中关村大街", "adcode": "110108", "coordsys": "gcj02"},
+     "geometry": {"type": "LineString", "coordinates": [[116.3220, 39.9580], [116.3175, 39.9700], [116.3162, 39.9840], [116.3150, 39.9990]]}},
+    {"type": "Feature", "properties": {"name": "世纪大道", "adcode": "310115", "coordsys": "gcj02"},
+     "geometry": {"type": "LineString", "coordinates": [[121.4995, 31.2396], [121.5200, 31.2290], [121.5450, 31.2200]]}}
+  ]
+}
