@@ -9,6 +9,21 @@ description = "面向中国地址的轻量地理编码服务：地址解析、�
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
+authors = [{ name = "GeoVerse Labs" }]
+keywords = ["geocoding", "reverse-geocoding", "address-parsing", "chinese-address", "china", "gis", "adcode", "gcj02"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
@@ -16,6 +31,12 @@ dependencies = [
     "numpy>=1.24",
     "pyahocorasick>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/GeoVerseLabs/geoverse-cn-coding"
+Documentation = "https://github.com/GeoVerseLabs/geoverse-cn-coding/tree/main/docs"
+Issues = "https://github.com/GeoVerseLabs/geoverse-cn-coding/issues"
+Changelog = "https://github.com/GeoVerseLabs/geoverse-cn-coding/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.5"]

@@ -39,22 +39,22 @@
 
 ```mermaid
 flowchart LR
-  subgraph 离线建库
-    A[区划 CSV + 别名] --> B[cngeocoder build]
-    C[边界 GeoJSON] --> B
-    D[POI / 门牌 CSV·GeoJSON] --> B
-    E[道路 GeoJSON] --> B
-    B --> F[(geocoder.db<br/>admin · place<br/>FTS5 · R*Tree)]
+  subgraph offline["离线建库"]
+    A["区划 CSV + 别名"] --> B["cngeocoder build"]
+    C["边界 GeoJSON"] --> B
+    D["POI / 门牌 CSV、GeoJSON"] --> B
+    E["道路 GeoJSON"] --> B
+    B --> F[("geocoder.db<br/>admin、place<br/>FTS5、R-Tree")]
   end
-  subgraph 在线服务（单进程）
-    Q1[正向请求] --> P[归一化 + 行政区链 + 详细地址切分]
-    P --> G[候选：门牌精确/插值 → POI → 道路 → 区划中心]
-    G --> S[重打分 + 置信度]
-    S -- 置信度不足 --> T[天地图兜底<br/>配额 + 熔断]
-    Q2[逆向请求] --> R[边界点落面 / 周边投票<br/>最近门牌、道路、POI]
+  subgraph online["在线服务（单进程）"]
+    Q1["正向请求"] --> P["归一化 + 行政区链 + 详细地址切分"]
+    P --> G["候选：门牌精确/插值 → POI → 道路 → 区划中心"]
+    G --> S["重打分 + 置信度"]
+    S -->|"置信度不足"| T["天地图兜底<br/>配额 + 熔断"]
+    Q2["逆向请求"] --> R["边界点落面 / 周边投票<br/>最近门牌、道路、POI"]
   end
-  F -. 只读 mmap .-> G
-  F -. 只读 mmap .-> R
+  F -.->|"只读 mmap"| G
+  F -.->|"只读 mmap"| R
 ```
 
 | 模块 | 职责 |

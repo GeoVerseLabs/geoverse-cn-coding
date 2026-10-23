@@ -4,6 +4,12 @@
 
 ## [未发布]
 
+### 修复
+- README 架构图：子图标题含全角括号导致 GitHub 上 Mermaid 渲染失败，改为 ASCII 子图 id + 带引号的标签。
+
+### 变更
+- `pyproject.toml` 补充 keywords、classifiers、项目链接。
+
 ## [0.1.0] - 2026-10-23
 
 首个版本。数据文件 `SCHEMA_VERSION = 3`。
