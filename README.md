@@ -8,7 +8,9 @@
 - 百万级 POI 下，单线程解析 0.08 ms、门牌 0.32 ms、POI 0.54 ms、逆地理 0.27 ms；
 - 一个 Docker 镜像即可部署，私有化或离线环境把镜像和 `.db` 文件拷过去就能运行。
 
-选型理由、与参考方案的差异和升级条件见 [docs/tech-selection.md](docs/tech-selection.md)。
+选型理由、与参考方案的差异和升级条件见 [docs/tech-selection.md](docs/tech-selection.md)；全部文档见 [docs/README.md](docs/README.md)。
+
+[![CI](https://github.com/GeoVerseLabs/geoverse-cn-coding/actions/workflows/ci.yml/badge.svg)](https://github.com/GeoVerseLabs/geoverse-cn-coding/actions/workflows/ci.yml)
 
 ## 针对国内地址的处理
 
@@ -214,7 +216,8 @@ src/cngeocoder/   服务代码
 data/admin/       区划词典、历史旧名、别名、中心点（出处见 data/README.md）
 data/sample/      示例 POI / 道路
 data/eval/        评测集示例
-docs/             技术选型、数据接入
+docs/             技术选型、数据源、数据接入、口语化处理、部署运维
+.github/          CI、PR 与 Issue 模板、Dependabot
 scripts/bench.py  性能基准
 scripts/sources/  数据源抽取与生成脚本（areacodes、Overture）
 tests/            单元与接口测试（合成数据）
@@ -228,7 +231,14 @@ tests/            单元与接口测试（合成数据）
 - 规则解析对口语化、错别字地址召回有限，可按评测集难例接入 MGeo 做结构化与重排；
 - 数据只读，更新靠重建（百万级约 1 分钟）；需要在线写入或超过数千万条时，按选型文档升级存储层。
 
+## 参与开发
+
+开发环境、分支与提交规范、PR 检查项和数据贡献规则见 [CONTRIBUTING.md](CONTRIBUTING.md)；部署与运维见 [docs/deployment.md](docs/deployment.md)；版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 数据来源与许可
+
+代码按 [Apache License 2.0](LICENSE) 许可；数据文件按各自来源的许可（见 [NOTICE](NOTICE) 与 [data/README.md](data/README.md)）。
+
 
 - 区划代码：[modood/Administrative-divisions-of-China](https://github.com/modood/Administrative-divisions-of-China)（WTFPL），原始数据来自国家统计局统计用区划代码；
 - 县级以上区划更新与历史旧名：[yescallop/areacodes](https://github.com/yescallop/areacodes)（CC0），原始数据来自国家地名信息库、民政部；

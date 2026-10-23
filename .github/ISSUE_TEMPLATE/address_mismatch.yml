@@ -1,0 +1,39 @@
+name: 地址匹配问题
+description: 某个地址解析错、定位偏差大、置信度不合理
+labels: [matching]
+body:
+  - type: markdown
+    attributes:
+      value: 请去掉收件人、电话等个人信息。确认后的同类问题会补进评测集（data/eval/）。
+  - type: input
+    id: address
+    attributes:
+      label: 地址原文
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      description: 期望的区县 / POI / 坐标（注明坐标系）
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际返回
+      description: /v1/geocode 或 /v1/reverse 返回的 JSON（含 signals、confidence）
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型
+      options:
+        - 行政区解析错
+        - 定位偏差大
+        - 置信度高但结果错
+        - 置信度低但结果对
+        - 没有返回结果
+        - 其他

@@ -1,0 +1,11 @@
+GeoVerse 中国地址编码服务（cngeocoder）
+Copyright 2026 GeoVerse Labs
+
+代码按 Apache License 2.0 许可（见 LICENSE）。
+
+data/ 目录下的数据文件有各自的来源与许可，不随代码许可变化，详见 data/README.md：
+- data/admin/provinces.csv、cities.csv、areas.csv、streets.csv：国家统计局统计用区划代码，
+  经 modood/Administrative-divisions-of-China 整理，WTFPL。
+- data/admin/extra.csv、history_aliases.csv：国家地名信息库、民政部，经 yescallop/areacodes 整理，CC0 1.0。
+- data/admin/centroids.csv：Overture Maps Foundation divisions 主题（源自 OpenStreetMap），
+  ODbL 1.0，© OpenStreetMap contributors, Overture Maps Foundation。

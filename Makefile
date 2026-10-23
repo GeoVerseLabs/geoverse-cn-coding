@@ -27,8 +27,11 @@ sources:
 serve:
 	GEOCODER_DB=$(DB) cngeocoder serve --port 8000
 
+# 评测卡口：标准地址区县准确率；口语化地址不允许“高置信度但错误”
 eval:
-	GEOCODER_DB=$(DB) cngeocoder eval data/eval/gold_sample.csv --min-district-acc 0.95
+	GEOCODER_DB=$(DB) cngeocoder eval data/eval/gold_sample.csv --min-district-acc 0.95 > /dev/null
+	GEOCODER_DB=$(DB) cngeocoder eval data/eval/colloquial_sample.csv --min-district-acc 0.95 --max-confident-wrong 0 > /dev/null
+	@echo "eval gates passed"
 
 bench:
 	$(PY) scripts/bench.py --n 1000000 --queries 5000
