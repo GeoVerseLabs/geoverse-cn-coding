@@ -1,12 +1,14 @@
 # GeoVerse 中国地址编码服务（cngeocoder）
 
-面向中国地址的轻量地理编码服务：**地址结构化解析、正向地理编码、逆地理编码、坐标系转换**。
+面向中国地址的轻量地理编码服务：**地址结构化解析、正向地理编码、逆地理编码、坐标系转换**，带数据管理界面、API Key 鉴权和 MCP 接入。
 按《地址解析与逆地理编码落地方案（国内 / 海外）》中的国内方案实现，并针对执行效率和部署简易性做了技术选型：
 **一个 Python 进程 + 一个 SQLite 数据文件**，不依赖 Elasticsearch、PostGIS、Redis。
 
 - 全国省 / 市 / 区县 / 乡镇四级区划词典、1,015 条历史旧名、3.8 万个区划中心点内置，开箱即可做地址标准化和区划级定位；
 - 百万级 POI 下，单线程解析 0.08 ms、门牌 0.32 ms、POI 0.54 ms、逆地理 0.27 ms；
-- 一个 Docker 镜像即可部署，私有化或离线环境把镜像和 `.db` 文件拷过去就能运行。
+- 一个 Docker 镜像即可部署，私有化或离线环境把镜像和 `.db` 文件拷过去就能运行；
+- 数据可在线维护：管理界面 `/admin`、管理 API、MCP 工具三种入口，修改立即生效并记入可重放的变更记录；
+- 内置 API Key 鉴权（read / write / admin 三级角色 + 限流），agent 可通过 MCP（HTTP 或 stdio）查询和维护数据。
 
 选型理由、与参考方案的差异和升级条件见 [docs/tech-selection.md](docs/tech-selection.md)；全部文档见 [docs/README.md](docs/README.md)。
 
@@ -53,9 +55,17 @@ flowchart LR
     S -->|"置信度不足"| T["天地图兜底<br/>配额 + 熔断"]
     Q2["逆向请求"] --> R["边界点落面 / 周边投票<br/>最近门牌、道路、POI"]
   end
+  subgraph manage["数据维护"]
+    U["管理界面 /admin<br/>管理 API"] --> M["DataManager<br/>写入 + 变更记录"]
+    AG["agent（MCP）"] --> M
+  end
   F -.->|"只读 mmap"| G
   F -.->|"只读 mmap"| R
+  M -->|"GEOCODER_EDITABLE=1"| F
+  M -.->|"edits export → build --edits"| B
 ```
+
+所有请求先过 API Key 鉴权（`auth.py`）：认证 → 角色授权 → 限流，调用方名称记入变更记录。
 
 | 模块 | 职责 |
 |---|---|
@@ -69,8 +79,26 @@ flowchart LR
 | `reverse.py` / `boundary.py` | 逆向：点落面、周边投票、最近道路、方位描述 |
 | `coords.py` | WGS84 / GCJ-02 / BD-09 互转 |
 | `fallback/tianditu.py` | 天地图兜底（配额、熔断） |
-| `build.py` | 离线建库 ETL |
-| `api.py` / `cli.py` | HTTP API、命令行 |
+| `build.py` | 离线建库 ETL；`PlaceIndexer` 与在线编辑共用 |
+| `edit.py` | 在线数据维护：要素与确认结果增删改、待审核队列、变更记录与重放 |
+| `auth.py` | API Key 鉴权、角色、限流 |
+| `mcp_server.py` | MCP 服务（Streamable HTTP + stdio） |
+| `api.py` / `cli.py` / `static/admin.html` | HTTP API、命令行、管理界面 |
+
+## 数据管理、鉴权与 MCP
+
+```bash
+cngeocoder keygen --name ops --role admin                 # 输出 key 和配置条目
+export GEOCODER_API_KEYS="ops:admin:sha256:<哈希>" GEOCODER_EDITABLE=1
+make serve                                                # 浏览器打开 http://127.0.0.1:8000/admin
+claude mcp add --transport http cngeocoder http://127.0.0.1:8000/mcp --header "Authorization: Bearer <key>"
+```
+
+| 文档 | 内容 |
+|---|---|
+| [docs/admin.md](docs/admin.md) | 管理界面、管理 API、写入规则、变更记录与重建 |
+| [docs/auth.md](docs/auth.md) | 鉴权流程、角色、密钥配置、限流 |
+| [docs/mcp.md](docs/mcp.md) | MCP 接入（HTTP / stdio）、工具列表、agent 维护约定 |
 
 ## 快速开始
 
@@ -79,7 +107,7 @@ flowchart LR
 ```bash
 pip install -e ".[dev]"
 make data          # 内置区划 + 示例 POI 建库 → var/geocoder.db
-make test          # 107 个测试
+make test          # 142 个测试
 make serve         # http://127.0.0.1:8000/docs
 ```
 
@@ -126,6 +154,12 @@ docker run -d -p 8000:8000 -v $PWD/var:/data -e GEOCODER_DB=/data/geocoder.db \
 | `GET /v1/convert?location=&from=&to=` | 坐标系转换 |
 | `POST /v1/feedback` | 回传确认坐标 `{"address","location","coordsys","source"}`，下次建库用 `--memory` 导入（需配置 `GEOCODER_FEEDBACK_LOG`） |
 | `GET /v1/meta` · `GET /health` | 数据版本、计数、缓存与兜底状态；健康检查 |
+| `GET /v1/auth/whoami` | 当前密钥的名称与角色 |
+| `/v1/admin/*` | 数据管理（admin 角色），见 [docs/admin.md](docs/admin.md) |
+| `GET /admin` | 数据管理界面 |
+| `POST /mcp` | MCP 服务，见 [docs/mcp.md](docs/mcp.md) |
+
+配置了 API Key 后，请求需带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`；`/health` 始终开放。角色与配置见 [docs/auth.md](docs/auth.md)。
 
 正向结果示例（示例数据，`coordsys=gcj02`）：
 
@@ -177,7 +211,14 @@ docker run -d -p 8000:8000 -v $PWD/var:/data -e GEOCODER_DB=/data/geocoder.db \
 | `GEOCODER_MIN_CONFIDENCE` | 0.6 | 低于该置信度才考虑兜底 |
 | `GEOCODER_REVIEW_LOG` | 空 | 兜底结果写入的待审核 JSONL |
 | `GEOCODER_CACHE_SIZE` | 20000 | 进程内 LRU 缓存条数 |
-| `GEOCODER_FEEDBACK_LOG` | 空 | `/v1/feedback` 写入的 JSONL，建库时 `--memory` 导入 |
+| `GEOCODER_FEEDBACK_LOG` | 空 | `/v1/feedback` 写入的 JSONL，进入待审核队列，或建库时 `--memory` 导入 |
+| `GEOCODER_EDITABLE` | 0 | 允许在线编辑（需要数据文件及所在目录可写），见 [docs/admin.md](docs/admin.md) |
+| `GEOCODER_API_KEYS` | 空 | API Key，`名称:角色:密钥`，逗号分隔；`cngeocoder keygen` 生成 |
+| `GEOCODER_API_KEYS_FILE` | 空 | 密钥文件（JSON，可按密钥配限流） |
+| `GEOCODER_ANONYMOUS_ROLE` | 无密钥 `write` / 有密钥 `none` | 未带密钥的请求的角色 |
+| `GEOCODER_RATE_LIMIT` | 0 | 每个调用方每分钟请求上限，0 不限 |
+
+鉴权的其余配置（`GEOCODER_ALLOW_QUERY_KEY`、`GEOCODER_PUBLIC_DOCS`、`GEOCODER_MCP_ORIGINS`）见 [docs/auth.md](docs/auth.md)。
 
 ## 数据
 
@@ -216,7 +257,7 @@ src/cngeocoder/   服务代码
 data/admin/       区划词典、历史旧名、别名、中心点（出处见 data/README.md）
 data/sample/      示例 POI / 道路
 data/eval/        评测集示例
-docs/             技术选型、数据源、数据接入、口语化处理、部署运维
+docs/             技术选型、数据源、数据接入、口语化处理、部署运维、数据管理、鉴权、MCP
 .github/          CI、PR 与 Issue 模板、Dependabot
 scripts/bench.py  性能基准
 scripts/sources/  数据源抽取与生成脚本（areacodes、Overture）
@@ -229,7 +270,8 @@ tests/            单元与接口测试（合成数据）
 - 未内置行政区边界和真实 POI/门牌：边界有合规要求，Overture 边界只建议内部使用；门牌需按 `docs/data.md` 导入自有数据；
 - 不做输入联想和拼音检索，需要时单独加 suggest 服务；
 - 规则解析对口语化、错别字地址召回有限，可按评测集难例接入 MGeo 做结构化与重排；
-- 数据只读，更新靠重建（百万级约 1 分钟）；需要在线写入或超过数千万条时，按选型文档升级存储层。
+- 在线编辑面向日常维护（单条增删改，提交锁库几毫秒）；大批量导入仍走建库（百万级约 1 分钟），重建前导出变更记录用 `--edits` 重放；数据超过数千万条时，按选型文档升级存储层；
+- 鉴权是进程内的 API Key + 限流，限流在各 worker 内独立计数；需要 OAuth、集中限流时放在网关之后。
 
 ## 参与开发
 

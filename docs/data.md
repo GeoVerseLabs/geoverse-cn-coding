@@ -2,7 +2,7 @@
 
 各类数据的来源、许可与选用理由见 [data-sources.md](data-sources.md)。
 
-服务的效果主要取决于数据。所有数据离线清洗后写进一个 SQLite 文件（默认 `var/geocoder.db`），在线服务只读这个文件。
+服务的效果主要取决于数据。所有数据离线清洗后写进一个 SQLite 文件（默认 `var/geocoder.db`），在线服务读这个文件；日常的单条修正可以在线完成（见 [admin.md](admin.md)），修改记入变更记录，下次建库用 `--edits` 重放。
 
 ```bash
 cngeocoder build \
@@ -11,6 +11,7 @@ cngeocoder build \
   --centroids  bounds/centroids.csv \      # 额外的中心点，覆盖内置值
   --places     poi/orders.csv poi/osm_points.geojson \
   --roads      roads/roads.geojson \
+  --edits      var/edits.jsonl \           # 在线编辑的变更记录（cngeocoder edits export 导出），最后重放
   --coordsys   wgs84 \                     # 输入坐标系，行内 coordsys 列优先
   --out var/geocoder.next.db
 ```
@@ -61,6 +62,7 @@ CSV 或 GeoJSON 点要素，字段名兼容英文、中文表头和 OSM 标签�
 | 坐标 | `lng`/`lon`/`x`，`lat`/`y` | GeoJSON 取几何 |
 | 坐标系 | `coordsys` | `wgs84` / `gcj02` / `bd09` / `cgcs2000` |
 | 热度 | `weight` | 同名候选时的排序加分 |
+| 标识 | `uid` | 可选，要素的稳定标识；没有时按“来源文件 + 内容”生成。在线编辑与重放按 uid 定位 |
 
 所属行政区的确定顺序：显式 `adcode` → 解析地址文本 → 边界点落面（文本与坐标冲突时以坐标为准）。
 

@@ -4,6 +4,21 @@
 
 ## [未发布]
 
+数据文件 `SCHEMA_VERSION = 4`（place 表新增 `uid` 列，新增 `change_log`、`review_state` 表），**需要用新版本重新建库**。
+
+### 新增
+- 数据管理：管理界面 `/admin`（要素、确认结果、待审核队列、变更记录、地址测试）与管理 API `/v1/admin/*`。`GEOCODER_EDITABLE=1` 时可在线增删改 POI / 门牌 / 道路和确认结果，本进程立即生效，其他 worker 约 1 秒内生效；区划编码与坐标明显矛盾时给出提示。
+- 待审核队列：兜底结果（`GEOCODER_REVIEW_LOG`）与业务反馈（`GEOCODER_FEEDBACK_LOG`）可在线审核，通过后写入确认结果。
+- 变更记录：每次修改记录操作人与前后内容；`cngeocoder edits export` 导出、`cngeocoder build --edits` 重放（按 uid / key 幂等），在线修改不会因重建丢失。
+- 要素稳定标识 `uid`：输入可显式给出，否则按来源与内容生成，同样的输入每次建库不变。
+- 鉴权：API Key（`GEOCODER_API_KEYS` / `GEOCODER_API_KEYS_FILE`，支持只存 SHA-256），read / write / admin 三级角色，按调用方限流（`GEOCODER_RATE_LIMIT`、密钥级 `rpm`），错误密钥节流，`/v1/auth/whoami`，`cngeocoder keygen`。
+- MCP：`POST /mcp`（Streamable HTTP，无状态）与 `cngeocoder mcp`（stdio），6 个查询工具 + 11 个数据维护工具，按角色开放。
+
+### 变更
+- 没有配置 API Key 时行为不变（查询与反馈开放）；配置后默认所有接口都要带密钥（`GEOCODER_ANONYMOUS_ROLE` 可调整）。
+- `/v1/feedback` 需要 write 角色；反馈日志增加 `by`（调用方）字段。
+- 建库时间约 +12%、数据文件约 +18%（`uid` 列与索引）；查询性能不变。20 万条基准（`scripts/bench.py --n 200000`）：建库 23.4 → 26.3 s，文件 49 → 58 MB，内存峰值 107 → 108 MB；POI 0.53 → 0.53 ms，门牌 0.40 → 0.39 ms，逆地理 0.20 → 0.19 ms。
+
 ### 修复
 - README 架构图：子图标题含全角括号导致 GitHub 上 Mermaid 渲染失败，改为 ASCII 子图 id + 带引号的标签。
 
