@@ -14,10 +14,11 @@ test:
 lint:
 	$(PY) -m ruff check src tests scripts
 
-# 用内置区划（含中心点、历史别名）+ 示例 POI 建库；接入自有数据时覆盖 PLACES/ROADS，另可加 BOUNDARIES
+# 用内置区划（含中心点、历史别名）+ 示例 POI 建库；接入自有数据时覆盖 PLACES/ROADS，另可加 BOUNDARIES、
+# 在线编辑的变更记录 EDITS（cngeocoder edits export 导出）
 data:
 	cngeocoder build --places $(PLACES) --roads $(ROADS) \
-		$(if $(BOUNDARIES),--boundaries $(BOUNDARIES),) --out $(DB)
+		$(if $(BOUNDARIES),--boundaries $(BOUNDARIES),) $(if $(EDITS),--edits $(EDITS),) --out $(DB)
 
 # 重新生成内置补充数据（需要网络与 pip install -e ".[sources]"）
 sources:

@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>地址数据管理 · cngeocoder</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #fff; --text: #1f2328; --muted: #656d76; --line: #d8dee4; --accent: #0969da;
+  --accent-bg: #ddf4ff; --danger: #cf222e; --danger-bg: #ffebe9; --ok: #1a7f37; --ok-bg: #dafbe1; --warn: #9a6700;
+  --warn-bg: #fff8c5; --code: #f3f4f6; --radius: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --line: #30363d; --accent: #4493f8;
+    --accent-bg: #121d2f; --danger: #f85149; --danger-bg: #25171c; --ok: #3fb950; --ok-bg: #12261e; --warn: #d29922;
+    --warn-bg: #272115; --code: #1f242c;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI",
+  "PingFang SC", "Microsoft YaHei", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: var(--panel);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0 8px 0 0; }
+nav { display: flex; gap: 2px; flex-wrap: wrap; }
+nav button { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
+nav button.active { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+nav .badge { margin-left: 4px; }
+.spacer { flex: 1; }
+main { max-width: 1280px; margin: 0 auto; padding: 20px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+.panel h2 { font-size: 15px; margin: 0 0 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.stat { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+.stat b { display: block; font-size: 22px; }
+.stat span { color: var(--muted); font-size: 12px; }
+input, select, textarea { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 8px; }
+textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button.btn { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px;
+  padding: 5px 12px; cursor: pointer; }
+button.btn:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--danger); }
+button.small { padding: 2px 8px; font-size: 12px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.badge { display: inline-block; padding: 0 7px; border-radius: 10px; font-size: 12px; background: var(--code); color: var(--muted); }
+.badge.ok { background: var(--ok-bg); color: var(--ok); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.danger { background: var(--danger-bg); color: var(--danger); }
+.badge.accent { background: var(--accent-bg); color: var(--accent); }
+.banner { padding: 10px 14px; border-radius: var(--radius); margin-bottom: 16px; background: var(--warn-bg); color: var(--warn); }
+.hidden { display: none !important; }
+.pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 10px; }
+form.fields { display: grid; grid-template-columns: 110px 1fr; gap: 8px 12px; align-items: center; }
+form.fields label { color: var(--muted); text-align: right; }
+form.fields .full { grid-column: 2; }
+.suggest ul { margin: 2px 0 0; padding: 4px 0; list-style: none;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; max-height: 240px; overflow: auto; }
+.suggest li { padding: 4px 10px; cursor: pointer; }
+.suggest li:hover { background: var(--accent-bg); }
+dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 0; width: min(720px, 94vw); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog .head { padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600; display: flex; }
+dialog .body { padding: 16px; max-height: 70vh; overflow: auto; }
+dialog .foot { padding: 12px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; }
+pre { background: var(--code); padding: 10px; border-radius: 6px; overflow: auto; font-size: 12px; margin: 6px 0 0; max-height: 360px; }
+#toast { position: fixed; right: 20px; bottom: 20px; padding: 10px 16px; border-radius: 8px; background: var(--text); white-space: pre-line;
+  color: var(--bg); opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 420px; z-index: 50; }
+#toast.show { opacity: .95; }
+#login { max-width: 420px; margin: 12vh auto; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+@media (max-width: 720px) {
+  form.fields { grid-template-columns: 1fr; }
+  form.fields label { text-align: left; }
+  form.fields .full { grid-column: 1; }
+  .wide-only { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div id="login" class="panel">
+  <h2>地址数据管理</h2>
+  <p class="muted">使用 admin 角色的 API Key 登录。密钥只保存在当前标签页，关闭即失效。</p>
+  <form id="loginForm" class="row">
+    <input id="loginKey" type="password" placeholder="API Key（cng_…）" autocomplete="off" style="flex:1">
+    <button class="btn primary" type="submit">登录</button>
+  </form>
+  <p id="loginErr" class="muted"></p>
+</div>
+
+<div id="app" class="hidden">
+<header>
+  <h1>地址数据管理</h1>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="places">要素</button>
+    <button data-tab="memory">确认结果</button>
+    <button data-tab="review">待审核<span id="reviewBadge" class="badge hidden"></span></button>
+    <button data-tab="changes">变更记录</button>
+    <button data-tab="test">地址测试</button>
+  </nav>
+  <span class="spacer"></span>
+  <label class="muted">坐标系
+    <select id="coordsys" title="界面上显示和输入的坐标系">
+      <option value="wgs84">WGS84</option><option value="gcj02">GCJ-02（高德/腾讯）</option>
+      <option value="bd09">BD-09（百度）</option>
+    </select>
+  </label>
+  <span id="modeBadge" class="badge"></span>
+  <span id="who" class="muted"></span>
+  <button class="btn small" id="logout">退出</button>
+</header>
+
+<main>
+  <div id="readonlyBanner" class="banner hidden">
+    只读模式：可以浏览数据，不能修改。要开启在线编辑，设置 <code>GEOCODER_EDITABLE=1</code>，并确保数据文件所在目录可写，然后重启服务。
+  </div>
+
+  <!-- 概览 -->
+  <section data-view="overview">
+    <div class="panel"><h2>数据</h2><div id="stats" class="grid"></div></div>
+    <div class="panel"><h2>服务</h2><dl id="serviceInfo" class="kv"></dl></div>
+    <div class="panel"><h2>API Key</h2>
+      <p class="muted">密钥通过 <code>GEOCODER_API_KEYS</code> / <code>GEOCODER_API_KEYS_FILE</code> 配置，用 <code>cngeocoder keygen</code> 生成。这里只显示名称、角色与本进程的调用计数。</p>
+      <table><thead><tr><th>名称</th><th>角色</th><th>密钥摘要</th><th class="num">每分钟上限</th><th class="num">请求数</th></tr></thead>
+        <tbody id="keysBody"></tbody></table>
+    </div>
+    <div class="panel"><h2>MCP 接入</h2>
+      <p class="muted">agent 可以通过 MCP 直接查询与维护数据（工具按密钥角色开放）。Claude Code 示例：</p>
+      <pre id="mcpSnippet"></pre>
+    </div>
+  </section>
+
+  <!-- 要素 -->
+  <section data-view="places" class="hidden">
+    <div class="panel">
+      <form id="placeFilter" class="row">
+        <input name="q" placeholder="名称 / 地址 / 路名 / 别名 / uid" style="flex:1;min-width:200px">
+        <select name="kind"><option value="">全部类型</option><option value="poi">POI</option>
+          <option value="address">门牌</option><option value="road">道路</option></select>
+        <input name="adcode" placeholder="区划编码前缀" size="12">
+        <input name="source" placeholder="来源（manual=在线新增）" size="18">
+        <button class="btn" type="submit">查询</button>
+        <button class="btn primary write" type="button" id="newPlace">新增要素</button>
+      </form>
+    </div>
+    <div class="panel">
+      <table><thead><tr><th>名称</th><th>类型</th><th>地址</th><th class="wide-only">行政区</th><th class="wide-only">坐标</th>
+        <th class="wide-only">来源</th><th></th></tr></thead><tbody id="placesBody"></tbody></table>
+      <div class="pager"><span id="placesTotal" class="muted"></span>
+        <button class="btn small" id="placesPrev">上一页</button><button class="btn small" id="placesNext">下一页</button></div>
+    </div>
+  </section>
+
+  <!-- 确认结果 -->
+  <section data-view="memory" class="hidden">
+    <div class="panel"><h2>新增确认结果</h2>
+      <p class="muted">“这种写法就是这个坐标”：同样的写法（含口语化写法）再来时直接命中，优先于检索结果。适合签收点、人工核验过的地址。</p>
+      <form id="memoryForm" class="row">
+        <input name="address" placeholder="地址写法，如“海淀区测试大厦后面的停车场”" required style="flex:2;min-width:260px">
+        <input name="location" placeholder="经度,纬度" required style="flex:1;min-width:180px">
+        <input name="count" type="number" min="1" value="1" title="确认次数，越多越可信" style="width:80px">
+        <button class="btn primary write" type="submit">保存</button>
+      </form>
+    </div>
+    <div class="panel">
+      <form id="memoryFilter" class="row" style="margin-bottom:10px">
+        <input name="q" placeholder="搜索写法" style="flex:1"><button class="btn" type="submit">查询</button>
+      </form>
+      <table><thead><tr><th>写法（key）</th><th class="wide-only">原始地址</th><th>坐标</th><th class="num">次数</th>
+        <th class="num">离散(米)</th><th></th></tr></thead><tbody id="memoryBody"></tbody></table>
+      <div class="pager"><span id="memoryTotal" class="muted"></span>
+        <button class="btn small" id="memoryPrev">上一页</button><button class="btn small" id="memoryNext">下一页</button></div>
+    </div>
+  </section>
+
+  <!-- 待审核 -->
+  <section data-view="review" class="hidden">
+    <div class="panel">
+      <p class="muted">兜底服务返回的结果（<code>GEOCODER_REVIEW_LOG</code>）和业务反馈（<code>GEOCODER_FEEDBACK_LOG</code>）。审核通过后写入确认结果，立即生效。</p>
+      <form id="reviewFilter" class="row">
+        <select name="source"><option value="">全部来源</option><option value="review">兜底结果</option><option value="feedback">业务反馈</option></select>
+        <select name="status"><option value="pending">待处理</option><option value="approved">已通过</option>
+          <option value="dismissed">已驳回</option><option value="all">全部</option></select>
+        <button class="btn" type="submit">刷新</button>
+        <span id="reviewEnabled" class="muted"></span>
+      </form>
+    </div>
+    <div class="panel">
+      <table><thead><tr><th>地址</th><th>来源</th><th>坐标</th><th class="wide-only">精度 / 区划</th><th>状态</th><th></th></tr></thead>
+        <tbody id="reviewBody"></tbody></table>
+      <div class="pager"><span id="reviewTotal" class="muted"></span>
+        <button class="btn small" id="reviewPrev">上一页</button><button class="btn small" id="reviewNext">下一页</button></div>
+    </div>
+  </section>
+
+  <!-- 变更记录 -->
+  <section data-view="changes" class="hidden">
+    <div class="panel">
+      <div class="row">
+        <p class="muted" style="flex:1;margin:0">在线编辑的全部记录。重建数据文件前导出，建库时加 <code>--edits 导出的文件</code> 重放，编辑不会丢失。</p>
+        <button class="btn" id="exportChanges">导出 JSONL</button>
+      </div>
+    </div>
+    <div class="panel">
+      <table><thead><tr><th class="num">#</th><th>时间</th><th>操作人</th><th>操作</th><th>对象</th><th></th></tr></thead>
+        <tbody id="changesBody"></tbody></table>
+      <div class="pager"><span id="changesTotal" class="muted"></span>
+        <button class="btn small" id="changesPrev">上一页</button><button class="btn small" id="changesNext">下一页</button></div>
+    </div>
+  </section>
+
+  <!-- 地址测试 -->
+  <section data-view="test" class="hidden">
+    <div class="panel"><h2>正向</h2>
+      <form id="geocodeForm" class="row">
+        <input name="address" placeholder="地址" required style="flex:2;min-width:260px">
+        <input name="city" placeholder="城市提示（可选）" style="flex:1;min-width:120px">
+        <button class="btn primary" type="submit">编码</button>
+      </form>
+      <div id="geocodeOut"></div>
+    </div>
+    <div class="panel"><h2>逆向</h2>
+      <form id="reverseForm" class="row">
+        <input name="location" placeholder="经度,纬度" required style="flex:1">
+        <button class="btn primary" type="submit">逆编码</button>
+      </form>
+      <div id="reverseOut"></div>
+    </div>
+  </section>
+</main>
+</div>
+
+<dialog id="placeDialog">
+  <div class="head"><span id="placeDialogTitle">新增要素</span></div>
+  <div class="body">
+    <form id="placeForm" class="fields" autocomplete="off">
+      <label>类型</label>
+      <select name="kind"><option value="poi">POI（有名称的地点）</option><option value="address">门牌点</option>
+        <option value="road">道路</option></select>
+      <label>名称</label><input name="name" placeholder="望京SOHO">
+      <label>别名</label><input name="alias" placeholder="多个用 | 分隔，如 北大|北京大学">
+      <label>地址</label><input name="address" placeholder="北京市朝阳区阜通东大街6号">
+      <label>路名</label><input name="road" placeholder="留空时从地址解析">
+      <label>门牌</label><input name="road_no" placeholder="18号 / 甲13号 / 100弄">
+      <label>区划编码</label>
+      <div class="suggest">
+        <input name="adcode" placeholder="留空按地址和坐标推断；输入名称可搜索" style="width:100%">
+        <ul id="regionList" class="hidden"></ul>
+      </div>
+      <label class="pointOnly">坐标</label>
+      <div class="row pointOnly"><input name="location" placeholder="经度,纬度" style="flex:1">
+        <span class="muted" id="placeCs"></span></div>
+      <label class="roadOnly">几何</label>
+      <textarea class="roadOnly" name="geometry" rows="5" placeholder='{"type":"LineString","coordinates":[[116.30,39.95],[116.30,39.96]]}'></textarea>
+      <label>热度</label><input name="weight" type="number" step="any" placeholder="0">
+      <label></label><div id="placeMeta" class="muted mono"></div>
+    </form>
+    <div id="placeErr" class="banner hidden" style="margin:12px 0 0;background:var(--danger-bg);color:var(--danger)"></div>
+  </div>
+  <div class="foot">
+    <button class="btn" id="placeCancel" type="button">取消</button>
+    <button class="btn primary write" id="placeSave" type="button">保存</button>
+  </div>
+</dialog>
+
+<dialog id="detailDialog">
+  <div class="head"><span id="detailTitle">详情</span></div>
+  <div class="body"><pre id="detailBody"></pre></div>
+  <div class="foot"><button class="btn" type="button" onclick="this.closest('dialog').close()">关闭</button></div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const KIND = {poi: "POI", address: "门牌", road: "道路"};
+const OP = {"place.upsert": "新增/修改要素", "place.delete": "删除要素", "memory.upsert": "写入确认结果",
+            "memory.delete": "删除确认结果", "review.resolve": "审核"};
+const PAGE = 20;
+const state = {key: null, me: null, editable: false, places: 0, memory: 0, review: 0, changes: 0, editing: null};
+
+function store(k, v) { try { v === undefined ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch (e) {} }
+function load(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+function pref(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+function toast(msg, ms = 2500) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), ms);
+}
+
+async function api(path, opts = {}) {
+  const headers = {"Authorization": "Bearer " + state.key, ...(opts.body ? {"Content-Type": "application/json"} : {})};
+  const res = await fetch(path, {...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined});
+  if (res.status === 401) { logout("登录已失效，请重新输入密钥"); throw new Error("未授权"); }
+  const ct = res.headers.get("content-type") || "";
+  const data = ct.includes("json") ? await res.json() : await res.text();
+  if (!res.ok) {
+    let d = data && data.detail;
+    if (Array.isArray(d)) d = d.map(x => (x.loc || []).slice(1).join(".") + "：" + x.msg).join("；");
+    throw new Error(d || ("HTTP " + res.status));
+  }
+  return data;
+}
+const cs = () => $("#coordsys").value;
+const qs = obj => new URLSearchParams(Object.entries(obj).filter(([, v]) => v !== "" && v != null)).toString();
+const loc = l => l && l.lng != null ? `${(+l.lng).toFixed(6)},${(+l.lat).toFixed(6)}` : "";
+const time = ts => ts ? new Date(ts * 1000).toLocaleString("zh-CN", {hour12: false}) : "";
+
+// ---------------------------------------------------------------- 登录
+async function login(key) {
+  state.key = key;
+  const res = await fetch("/v1/auth/whoami", {headers: {"Authorization": "Bearer " + key}});
+  const me = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(me.detail || "密钥无效");
+  if (!me.auth_enabled) throw new Error("服务未配置 API Key（GEOCODER_API_KEYS），数据管理不可用");
+  if (me.role !== "admin") throw new Error(`该密钥的角色是 ${me.role}，数据管理需要 admin`);
+  state.me = me; store("cng_key", key);
+  $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
+  $("#who").textContent = me.name;
+  await refreshOverview();
+  show(location.hash.slice(1) || "overview");
+}
+function logout(msg) {
+  state.key = null; store("cng_key");
+  $("#app").classList.add("hidden"); $("#login").classList.remove("hidden");
+  $("#loginErr").textContent = msg || ""; $("#loginKey").value = "";
+}
+$("#loginForm").addEventListener("submit", async e => {
+  e.preventDefault(); $("#loginErr").textContent = "";
+  try { await login($("#loginKey").value.trim()); } catch (err) { $("#loginErr").textContent = err.message; }
+});
+$("#logout").onclick = () => logout();
+
+// ---------------------------------------------------------------- 标签页
+function show(tab) {
+  if (!$(`[data-view="${tab}"]`)) tab = "overview";
+  $$("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  $$("[data-view]").forEach(v => v.classList.toggle("hidden", v.dataset.view !== tab));
+  history.replaceState(null, "", "#" + tab);
+  ({overview: refreshOverview, places: loadPlaces, memory: loadMemory, review: loadReview, changes: loadChanges}[tab] || (() => {}))();
+}
+$$("#tabs button").forEach(b => b.onclick = () => show(b.dataset.tab));
+$("#coordsys").value = pref("cng_cs") || "gcj02";
+$("#coordsys").onchange = () => { pref("cng_cs", cs()); show(location.hash.slice(1)); };
+
+function setEditable(on) {
+  state.editable = on;
+  $("#readonlyBanner").classList.toggle("hidden", on);
+  $("#modeBadge").textContent = on ? "可编辑" : "只读";
+  $("#modeBadge").className = "badge " + (on ? "ok" : "warn");
+  $$(".write").forEach(b => b.disabled = !on);
+}
+
+// ---------------------------------------------------------------- 概览
+async function refreshOverview() {
+  const d = await api("/v1/admin/overview");
+  setEditable(d.editable);
+  const c = d.counts || {};
+  const items = [["POI", c.poi], ["门牌", c.address], ["道路", c.road], ["确认结果", c.memory], ["行政区", c.admin],
+    ["有中心点的行政区", c.admin_with_coord], ["有边界的行政区", c.admin_with_boundary], ["变更记录", c.changes]];
+  $("#stats").innerHTML = items.map(([k, v]) => `<div class="stat"><b>${(v || 0).toLocaleString()}</b><span>${esc(k)}</span></div>`).join("");
+  const pending = d.review.pending;
+  $("#reviewBadge").textContent = pending; $("#reviewBadge").classList.toggle("hidden", !pending);
+  const fb = d.fallback ? `已开启（熔断 ${esc(d.fallback.breaker)}，今日 ${esc(d.fallback.quota_used)} / ${esc(d.fallback.quota_limit)}）` : "未开启";
+  const kv = [["数据文件", d.db], ["建库时间", d.built_at], ["表结构版本", d.schema_version], ["编辑版本", d.edit_version],
+    ["在线编辑", d.editable ? "开启" : "关闭（只读）"], ["兜底服务", fb],
+    ["缓存", `正向 ${d.cache.geocode.size} 条（命中 ${d.cache.geocode.hits}），逆向 ${d.cache.reverse.size} 条`],
+    ["待审核来源", `兜底结果 ${d.review.review ? "已配置" : "未配置"}，业务反馈 ${d.review.feedback ? "已配置" : "未配置"}`],
+    ["匿名访问", d.auth.anonymous_role === "none" ? "禁止" : `允许（${d.auth.anonymous_role}）`],
+    ["全局限流", d.auth.rate_limit ? d.auth.rate_limit + " 次/分钟" : "不限"]];
+  $("#serviceInfo").innerHTML = kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+  $("#keysBody").innerHTML = d.auth.keys.map(k => `<tr><td>${esc(k.name)}${k.name === state.me.name ? ' <span class="badge accent">当前</span>' : ""}</td>
+    <td><span class="badge ${k.role === "admin" ? "danger" : k.role === "write" ? "warn" : ""}">${esc(k.role)}</span></td>
+    <td class="mono">${esc(k.key_hint)}…</td><td class="num">${esc(k.rpm ?? (d.auth.rate_limit || "不限"))}</td>
+    <td class="num">${esc(k.requests)}</td></tr>`).join("") +
+    `<tr><td class="muted">匿名</td><td>${esc(d.auth.anonymous_role)}</td><td></td><td></td><td class="num">${esc(d.auth.anonymous_requests)}</td></tr>`;
+  const base = location.origin;
+  $("#mcpSnippet").textContent =
+`# HTTP（远程服务）
+claude mcp add --transport http cngeocoder ${base}/mcp --header "Authorization: Bearer <API Key>"
+
+# stdio（本机直接读写数据文件）
+claude mcp add cngeocoder -- cngeocoder --db /path/to/geocoder.db mcp --role admin`;
+}
+
+// ---------------------------------------------------------------- 要素
+function formData(form) { return Object.fromEntries(new FormData(form).entries()); }
+async function loadPlaces() {
+  const f = formData($("#placeFilter"));
+  const d = await api("/v1/admin/places?" + qs({...f, offset: state.places, limit: PAGE, coordsys: cs()}));
+  $("#placesBody").innerHTML = d.items.map(p => `<tr>
+    <td>${esc(p.name || "—")}${p.alias.length ? `<div class="muted">别名：${esc(p.alias.join("、"))}</div>` : ""}</td>
+    <td><span class="badge">${esc(KIND[p.kind] || p.kind)}</span></td>
+    <td>${esc(p.address || [p.road, p.road_no].filter(Boolean).join(""))}</td>
+    <td class="wide-only">${esc(p.region || "")}<div class="muted mono">${esc(p.adcode || "")}</div></td>
+    <td class="wide-only mono">${esc(loc(p.location))}</td>
+    <td class="wide-only muted">${esc(p.source)}</td>
+    <td style="white-space:nowrap"><button class="btn small" data-edit="${esc(p.uid)}">编辑</button>
+      <button class="btn small danger write" data-del="${esc(p.uid)}" ${state.editable ? "" : "disabled"}>删除</button></td></tr>`).join("")
+    || `<tr><td colspan="7" class="muted">没有匹配的要素</td></tr>`;
+  pager("places", d);
+}
+function pager(name, d) {
+  $(`#${name}Total`).textContent = d.total ? `${d.offset + 1}–${d.offset + d.items.length} / 共 ${d.total}${d.total_capped ? "+" : ""} 条` : "";
+  $(`#${name}Prev`).disabled = d.offset <= 0;
+  $(`#${name}Next`).disabled = d.offset + d.items.length >= d.total;
+}
+for (const [name, fn] of [["places", () => loadPlaces()], ["memory", () => loadMemory()], ["review", () => loadReview()], ["changes", () => loadChanges()]]) {
+  const size = name === "changes" ? 50 : PAGE;
+  $(`#${name}Prev`).onclick = () => { state[name] = Math.max(0, state[name] - size); fn(); };
+  $(`#${name}Next`).onclick = () => { state[name] += size; fn(); };
+}
+$("#placeFilter").addEventListener("submit", e => { e.preventDefault(); state.places = 0; loadPlaces().catch(err => toast(err.message)); });
+$("#placesBody").addEventListener("click", async e => {
+  const t = e.target;
+  if (t.dataset.edit) openPlace(await api(`/v1/admin/places/${encodeURIComponent(t.dataset.edit)}?coordsys=${cs()}`));
+  if (t.dataset.del && confirm("确定删除该要素？删除立即生效，变更记录里会保留删除前的内容。")) {
+    try { await api(`/v1/admin/places/${encodeURIComponent(t.dataset.del)}`, {method: "DELETE"}); toast("已删除"); loadPlaces(); }
+    catch (err) { toast(err.message); }
+  }
+});
+
+const placeForm = $("#placeForm");
+function syncKind() {
+  const road = placeForm.kind.value === "road";
+  $$(".pointOnly", placeForm).forEach(el => el.classList.toggle("hidden", road));
+  $$(".roadOnly", placeForm).forEach(el => el.classList.toggle("hidden", !road));
+}
+placeForm.kind.onchange = syncKind;
+function openPlace(p) {
+  state.editing = p || null;
+  placeForm.reset(); $("#placeErr").classList.add("hidden");
+  $("#placeDialogTitle").textContent = p ? `编辑要素 · ${p.name || p.uid}` : "新增要素";
+  $("#placeCs").textContent = $("#coordsys").selectedOptions[0].textContent;
+  if (p) {
+    for (const k of ["kind", "name", "address", "road", "road_no", "adcode", "weight"]) placeForm[k].value = p[k] ?? "";
+    placeForm.alias.value = p.alias.join("|");
+    placeForm.location.value = p.kind === "road" ? "" : loc(p.location);
+    placeForm.geometry.value = p.geometry ? JSON.stringify(p.geometry) : "";
+    placeForm.kind.disabled = true;
+    $("#placeMeta").textContent = `uid ${p.uid} · id ${p.id} · 来源 ${p.source}` + (p.abbr.length ? ` · 自动简称 ${p.abbr.join("、")}` : "");
+  } else {
+    placeForm.kind.disabled = false; $("#placeMeta").textContent = "";
+  }
+  syncKind();
+  $("#placeSave").disabled = !state.editable;
+  $("#placeDialog").showModal();
+}
+$("#newPlace").onclick = () => openPlace(null);
+$("#placeCancel").onclick = () => $("#placeDialog").close();
+$("#placeSave").onclick = async () => {
+  const f = formData(placeForm), p = state.editing;
+  const body = {coordsys: cs()};
+  const fields = ["name", "alias", "address", "road", "road_no", "adcode", "weight"];
+  for (const k of fields) {
+    const v = (f[k] ?? "").trim();
+    const old = p ? (k === "alias" ? p.alias.join("|") : String(p[k] ?? "")) : "";
+    if (!p ? v !== "" : v !== old) body[k] = v === "" ? null : (k === "weight" ? +v : v);
+  }
+  const kind = p ? p.kind : f.kind;
+  if (!p) body.kind = kind;
+  if (kind === "road") {
+    const g = (f.geometry || "").trim();
+    if (!p || g !== JSON.stringify(p.geometry || "")) {
+      try { if (g) body.geometry = JSON.parse(g); } catch (e) { return showErr("几何不是合法的 JSON"); }
+    }
+  } else {
+    const l = (f.location || "").trim();
+    if (!p ? l : l !== loc(p.location)) body.location = l || null;
+  }
+  try {
+    const r = p ? await api(`/v1/admin/places/${encodeURIComponent(p.uid)}`, {method: "PATCH", body})
+                : await api("/v1/admin/places", {method: "POST", body});
+    $("#placeDialog").close();
+    toast(`已保存：${r.name || r.uid}（${r.region || "未定位行政区"}）` + (r.warnings ? "\n⚠ " + r.warnings.join("；") : ""),
+          r.warnings ? 9000 : 4000);
+    loadPlaces();
+  } catch (err) { showErr(err.message); }
+};
+function showErr(msg) { const el = $("#placeErr"); el.textContent = msg; el.classList.remove("hidden"); }
+
+// 区划编码联想
+let regionTimer;
+placeForm.adcode.addEventListener("input", () => {
+  clearTimeout(regionTimer);
+  const q = placeForm.adcode.value.trim();
+  if (!q || /^\d{6,}$/.test(q)) return $("#regionList").classList.add("hidden");
+  regionTimer = setTimeout(async () => {
+    const d = await api("/v1/admin/regions?" + qs({q, limit: 12}));
+    $("#regionList").innerHTML = d.items.map(r => `<li data-code="${esc(r.adcode)}">${esc(r.full_name)} <span class="muted mono">${esc(r.adcode)}</span></li>`).join("");
+    $("#regionList").classList.toggle("hidden", !d.items.length);
+  }, 200);
+});
+$("#regionList").addEventListener("click", e => {
+  const li = e.target.closest("li"); if (!li) return;
+  placeForm.adcode.value = li.dataset.code; $("#regionList").classList.add("hidden");
+});
+placeForm.adcode.addEventListener("blur", () => setTimeout(() => $("#regionList").classList.add("hidden"), 200));
+
+// ---------------------------------------------------------------- 确认结果
+async function loadMemory() {
+  const d = await api("/v1/admin/memory?" + qs({...formData($("#memoryFilter")), offset: state.memory, limit: PAGE, coordsys: cs()}));
+  $("#memoryBody").innerHTML = d.items.map(m => `<tr><td>${esc(m.key)}</td><td class="wide-only muted">${esc(m.address)}</td>
+    <td class="mono">${esc(loc(m.location))}</td><td class="num">${esc(m.count)}</td><td class="num">${esc(m.spread_m)}</td>
+    <td><button class="btn small danger write" data-key="${esc(m.key)}" ${state.editable ? "" : "disabled"}>删除</button></td></tr>`).join("")
+    || `<tr><td colspan="6" class="muted">没有确认结果</td></tr>`;
+  pager("memory", d);
+}
+$("#memoryFilter").addEventListener("submit", e => { e.preventDefault(); state.memory = 0; loadMemory(); });
+$("#memoryForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const f = formData(e.target);
+  try {
+    const r = await api("/v1/admin/memory", {method: "POST", body: {address: f.address, location: f.location, count: +f.count || 1, coordsys: cs()}});
+    toast(`已写入 ${r.items.length} 个写法`); e.target.reset(); state.memory = 0; loadMemory();
+  } catch (err) { toast(err.message, 4000); }
+});
+$("#memoryBody").addEventListener("click", async e => {
+  const key = e.target.dataset.key;
+  if (key && confirm(`删除确认结果“${key}”？`)) {
+    try { await api("/v1/admin/memory?" + qs({key}), {method: "DELETE"}); toast("已删除"); loadMemory(); } catch (err) { toast(err.message); }
+  }
+});
+
+// ---------------------------------------------------------------- 待审核
+const SRC = {review: "兜底结果", feedback: "业务反馈"};
+const STATUS = {pending: ["待处理", "warn"], approved: ["已通过", "ok"], dismissed: ["已驳回", ""]};
+async function loadReview() {
+  const d = await api("/v1/admin/review?" + qs({...formData($("#reviewFilter")), offset: state.review, limit: PAGE, coordsys: cs()}));
+  const off = Object.entries(d.enabled).filter(([, v]) => !v).map(([k]) => SRC[k]);
+  $("#reviewEnabled").textContent = off.length ? `未配置：${off.join("、")}` : "";
+  $("#reviewBody").innerHTML = d.items.map(r => {
+    const [st, cls] = STATUS[r.status] || [r.status, ""];
+    const act = r.status === "pending" ? `<button class="btn small write" data-ok="${esc(r.id)}" ${state.editable ? "" : "disabled"}>通过</button>
+      <button class="btn small write" data-fix="${esc(r.id)}" data-loc="${esc(loc(r.location))}" ${state.editable ? "" : "disabled"}>改坐标后通过</button>
+      <button class="btn small danger write" data-no="${esc(r.id)}" ${state.editable ? "" : "disabled"}>驳回</button>` :
+      `<span class="muted">${esc(r.resolved_by || "")} ${esc(time(r.resolved_at))}</span>`;
+    return `<tr><td>${esc(r.address)}<div class="muted">${esc(time(r.ts))}</div></td><td>${esc(SRC[r.source])}${r.provider ? `<div class="muted">${esc(r.provider)}</div>` : ""}</td>
+      <td class="mono">${esc(loc(r.location))}</td><td class="wide-only">${esc(r.precision || "")} <span class="mono muted">${esc(r.adcode || "")}</span></td>
+      <td><span class="badge ${cls}">${esc(st)}</span></td><td style="white-space:nowrap">${act}</td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="muted">队列为空</td></tr>`;
+  pager("review", d);
+}
+$("#reviewFilter").addEventListener("submit", e => { e.preventDefault(); state.review = 0; loadReview(); });
+$("#reviewBody").addEventListener("click", async e => {
+  const t = e.target, id = t.dataset.ok || t.dataset.fix || t.dataset.no;
+  if (!id) return;
+  const body = {action: t.dataset.no ? "dismiss" : "approve", coordsys: cs()};
+  if (t.dataset.fix) {
+    const l = prompt("修正后的坐标（经度,纬度）", t.dataset.loc); if (!l) return; body.location = l;
+  }
+  try { await api(`/v1/admin/review/${encodeURIComponent(id)}`, {method: "POST", body}); toast(body.action === "approve" ? "已通过，写入确认结果" : "已驳回"); loadReview(); refreshOverview(); }
+  catch (err) { toast(err.message); }
+});
+
+// ---------------------------------------------------------------- 变更记录
+async function loadChanges() {
+  const d = await api("/v1/admin/changes?" + qs({offset: state.changes, limit: 50}));
+  state.changeItems = Object.fromEntries(d.items.map(c => [c.seq, c]));
+  $("#changesBody").innerHTML = d.items.map(c => `<tr><td class="num">${c.seq}</td><td>${esc(time(c.ts))}</td><td>${esc(c.actor || "")}</td>
+    <td>${esc(OP[c.op] || c.op)}</td><td>${esc((c.data && c.data.name) || c.target || "")}</td>
+    <td><button class="btn small" data-seq="${c.seq}">详情</button></td></tr>`).join("") || `<tr><td colspan="6" class="muted">还没有在线编辑</td></tr>`;
+  pager("changes", d);
+}
+$("#changesBody").addEventListener("click", e => {
+  const c = state.changeItems && state.changeItems[e.target.dataset.seq]; if (!c) return;
+  $("#detailTitle").textContent = `#${c.seq} ${OP[c.op] || c.op}`;
+  $("#detailBody").textContent = JSON.stringify({修改后: c.data, 修改前: c.before}, null, 2);
+  $("#detailDialog").showModal();
+});
+$("#exportChanges").onclick = async () => {
+  const res = await fetch("/v1/admin/changes/export", {headers: {"Authorization": "Bearer " + state.key}});
+  if (!res.ok) return toast("导出失败：HTTP " + res.status);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await res.blob());
+  a.download = (res.headers.get("content-disposition") || "").match(/filename="(.+)"/)?.[1] || "edits.jsonl";
+  a.click(); URL.revokeObjectURL(a.href);
+};
+
+// ---------------------------------------------------------------- 地址测试
+function summary(r) {
+  if (!r) return '<p class="muted">没有结果</p>';
+  const conf = r.confidence ?? 0;
+  return `<dl class="kv" style="margin-top:12px"><dt>标准地址</dt><dd>${esc(r.formatted_address)}</dd>
+    <dt>坐标</dt><dd class="mono">${esc(loc(r.location))}</dd>
+    <dt>精度</dt><dd>${esc(r.precision)} · 来源 ${esc(r.source)}</dd>
+    <dt>置信度</dt><dd><span class="badge ${conf >= .8 ? "ok" : conf >= .6 ? "warn" : "danger"}">${esc(conf)}</span></dd>
+    ${r.matched ? `<dt>命中要素</dt><dd>${esc(r.matched.name || "")} ${esc(r.matched.road || "")}${esc(r.matched.road_no || "")}</dd>` : ""}</dl>`;
+}
+$("#geocodeForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const f = formData(e.target);
+  try {
+    const d = await api("/v1/geocode?" + qs({...f, coordsys: cs(), fallback: false, limit: 3}));
+    $("#geocodeOut").innerHTML = summary(d.results[0]) + `<details><summary class="muted">完整结果</summary><pre>${esc(JSON.stringify(d, null, 2))}</pre></details>`;
+  } catch (err) { toast(err.message); }
+});
+$("#reverseForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  try {
+    const d = await api("/v1/reverse?" + qs({location: formData(e.target).location, coordsys: cs()}));
+    $("#reverseOut").innerHTML = `<dl class="kv" style="margin-top:12px"><dt>地址</dt><dd>${esc(d.formatted_address)}</dd>
+      <dt>描述</dt><dd>${esc(d.description || "")}</dd><dt>行政区来源</dt><dd>${esc(d.admin_source)}</dd></dl>
+      <details><summary class="muted">完整结果</summary><pre>${esc(JSON.stringify(d, null, 2))}</pre></details>`;
+  } catch (err) { toast(err.message); }
+});
+
+// ---------------------------------------------------------------- 启动
+const saved = load("cng_key");
+if (saved) login(saved).catch(err => logout(err.message));
+</script>
+</body>
+</html>

@@ -125,3 +125,24 @@ def engine(fixture_dir, tmp_path_factory) -> Engine:
 def engine_no_boundary(fixture_dir, tmp_path_factory) -> Engine:
     db = _build(fixture_dir, tmp_path_factory.mktemp("db2") / "g.db", boundaries=False)
     return Engine(Settings(db_path=db))
+
+
+@pytest.fixture(scope="session")
+def base_db(fixture_dir, tmp_path_factory) -> str:
+    """带边界的基础库，各编辑测试复制一份再改，互不影响。"""
+    return _build(fixture_dir, tmp_path_factory.mktemp("base") / "g.db", boundaries=True)
+
+
+@pytest.fixture
+def editable_db(base_db, tmp_path) -> str:
+    import shutil
+
+    out = tmp_path / "edit.db"
+    shutil.copy(base_db, out)
+    return str(out)
+
+
+@pytest.fixture
+def editable_engine(editable_db, tmp_path) -> Engine:
+    return Engine(Settings(db_path=editable_db, editable=True, review_log=str(tmp_path / "review.jsonl"),
+                           feedback_log=str(tmp_path / "feedback.jsonl")))

@@ -1,4 +1,4 @@
-"""进程内 LRU + TTL 缓存。单机部署不需要 Redis；多副本时各自缓存即可（数据只读）。"""
+"""进程内 LRU + TTL 缓存。单机部署不需要 Redis；多副本时各自缓存即可；在线编辑后由 Engine 按数据版本清空。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ class LRUCache:
         self._data: OrderedDict[Hashable, tuple[float, Any]] = OrderedDict()
         self._lock = threading.Lock()
         self.hits = self.misses = 0
+        # 每次 clear 加一。计算前记下代号、写入时代号已变就丢弃：数据更新前开始计算的旧结果不会在清空后又写回缓存
+        self.generation = 0
 
     def get(self, key: Hashable) -> Any | None:
         if self.maxsize <= 0:
@@ -30,14 +32,21 @@ class LRUCache:
             self.hits += 1
             return item[1]
 
-    def put(self, key: Hashable, value: Any) -> None:
+    def put(self, key: Hashable, value: Any, generation: int | None = None) -> None:
         if self.maxsize <= 0:
             return
         with self._lock:
+            if generation is not None and generation != self.generation:
+                return
             self._data[key] = (time.monotonic() + self.ttl, value)
             self._data.move_to_end(key)
             while len(self._data) > self.maxsize:
                 self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+            self.generation += 1
 
     def stats(self) -> dict[str, int]:
         return {"size": len(self._data), "hits": self.hits, "misses": self.misses}

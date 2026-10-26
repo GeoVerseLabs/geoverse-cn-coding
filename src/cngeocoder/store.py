@@ -2,18 +2,22 @@
 
 - ``place_fts``：FTS5 倒排（region 列放行政区编码 token，name/addr 列放中文 bigram）；
 - ``place_rtree``：R*Tree 空间索引，逆地理找周边；
-- 在线服务以只读 + immutable 方式打开，多线程/多进程并发读无锁。
+- 默认以只读 + immutable 方式打开，多线程/多进程并发读无锁；
+- 开启在线编辑（``editable``）时读连接去掉 immutable（才能看到新提交），写入走单独的写连接。
+  用回滚日志而不是 WAL：每次提交都直接落在主文件里，之后以只读 / immutable 方式打开（含命令行工具、
+  切回只读部署）不会漏掉修改；代价是提交的几毫秒内读请求需要等锁（busy_timeout 兜底）。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-SCHEMA_VERSION = "3"  # 改表结构时递增，服务启动会校验
+SCHEMA_VERSION = "4"  # 改表结构时递增，服务启动会校验
 
 SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -43,15 +47,23 @@ CREATE TABLE place (
     weight REAL NOT NULL DEFAULT 0,
     source TEXT,
     alias TEXT,                    -- 数据提供方给的别名，'|' 分隔（北大|北京大学）
-    abbr TEXT                      -- 建库时按简称规律生成的别名（北京工人体育场 → 工体），'|' 分隔
+    abbr TEXT,                     -- 建库时按简称规律生成的别名（北京工人体育场 → 工体），'|' 分隔
+    uid TEXT NOT NULL              -- 稳定标识：数据里的 uid 列，或按来源 + 内容生成；在线编辑按 uid 定位、重放
 );
 -- 历史确认结果：同一地址写法多次确认的坐标（签收点、人工核验、兜底审核），key 为归一化写法
 CREATE TABLE memory (key TEXT PRIMARY KEY, lng REAL NOT NULL, lat REAL NOT NULL, n INTEGER NOT NULL,
                      spread REAL NOT NULL, adcode TEXT, sample TEXT);
+-- 在线编辑的变更日志：导出后在下次建库时用 --edits 重放，编辑不会因重建丢失
+CREATE TABLE change_log (seq INTEGER PRIMARY KEY, ts INTEGER NOT NULL, actor TEXT, op TEXT NOT NULL,
+                         target TEXT, data TEXT, before TEXT);
+-- 待审核队列（兜底结果、业务反馈）的处理状态，key 为日志行的哈希
+CREATE TABLE review_state (id TEXT PRIMARY KEY, status TEXT NOT NULL, ts INTEGER NOT NULL, actor TEXT);
 CREATE INDEX idx_place_road ON place (road, district_code);
 CREATE VIRTUAL TABLE place_fts USING fts5 (region, name, addr, content='');
 CREATE VIRTUAL TABLE place_rtree USING rtree (id, min_lng, max_lng, min_lat, max_lat);
 """
+# 建库导入完要素后再建（批量建索引比逐行维护快），见 build.Builder._index_uids
+UID_INDEX = "CREATE UNIQUE INDEX idx_place_uid ON place (uid)"
 
 
 @dataclass(slots=True)
@@ -110,25 +122,55 @@ def region_tokens(code: str | None) -> str:
 
 
 class Store:
-    """只读访问。每个线程一个连接（sqlite3 连接不能跨线程共享）。"""
+    """读访问。每个线程一个只读连接（sqlite3 连接不能跨线程共享）；在线编辑时另有一个写连接。"""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, editable: bool = False, immutable: bool | None = None):
         self.path = path
+        self.editable = editable
+        # immutable 只能用在没有任何进程写入的文件上；可能有在线编辑进程同时运行时传 immutable=False
+        self.immutable = (not editable) if immutable is None else (immutable and not editable)
         self._local = threading.local()
+        self._writer: sqlite3.Connection | None = None
+        self.write_lock = threading.Lock()
+        if editable:
+            if not os.access(path, os.W_OK) or not os.access(os.path.dirname(os.path.abspath(path)), os.W_OK):
+                raise RuntimeError(f"在线编辑需要数据文件及其所在目录可写: {path}")
+            self.writer().execute("PRAGMA journal_mode = DELETE")
         # 打开一次，确认文件存在且版本匹配
         meta = self.meta()
         if meta.get("schema_version") != SCHEMA_VERSION:
-            raise RuntimeError(f"数据文件版本不匹配: {meta.get('schema_version')} != {SCHEMA_VERSION}")
+            raise RuntimeError(f"数据文件版本不匹配: {meta.get('schema_version')} != {SCHEMA_VERSION}"
+                               "（用当前版本重新建库）")
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self._local, "conn", None)
         if c is None:
-            c = sqlite3.connect(f"file:{self.path}?mode=ro&immutable=1", uri=True, check_same_thread=False)
+            # 只读模式下数据文件不会变化，immutable 省掉文件锁；在线编辑时必须去掉，否则读不到新数据
+            mode = "mode=ro&immutable=1" if self.immutable else "mode=ro"
+            c = sqlite3.connect(f"file:{self.path}?{mode}", uri=True, check_same_thread=False)
             c.execute("PRAGMA query_only = 1")
             c.execute("PRAGMA mmap_size = 268435456")
             c.execute("PRAGMA cache_size = -65536")
+            if not self.immutable:
+                c.execute("PRAGMA busy_timeout = 5000")
             self._local.conn = c
         return c
+
+    def writer(self) -> sqlite3.Connection:
+        """写连接（全进程一个，调用方持有 write_lock）。多进程之间靠 SQLite 文件锁串行。"""
+        if not self.editable:
+            raise PermissionError("数据文件以只读方式打开（设置 GEOCODER_EDITABLE=1 开启在线编辑）")
+        if self._writer is None:
+            c = sqlite3.connect(f"file:{self.path}?mode=rw", uri=True, check_same_thread=False,
+                                isolation_level=None)
+            c.execute("PRAGMA busy_timeout = 10000")
+            c.execute("PRAGMA synchronous = NORMAL")
+            self._writer = c
+        return self._writer
+
+    def edit_version(self) -> int:
+        row = self.conn().execute("SELECT value FROM meta WHERE key = 'edit_version'").fetchone()
+        return int(row[0]) if row else 0
 
     def meta(self) -> dict[str, str]:
         return dict(self.conn().execute("SELECT key, value FROM meta"))
@@ -207,4 +249,5 @@ class Store:
         out["admin_with_coord"] = c.execute("SELECT COUNT(*) FROM admin WHERE lng IS NOT NULL").fetchone()[0]
         out["admin_with_boundary"] = c.execute("SELECT COUNT(*) FROM admin WHERE geom IS NOT NULL").fetchone()[0]
         out["memory"] = c.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+        out["changes"] = c.execute("SELECT COUNT(*) FROM change_log").fetchone()[0]
         return out

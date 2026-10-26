@@ -165,3 +165,18 @@ def to_wgs84_array(coords: np.ndarray, src: str | CoordSys) -> np.ndarray:
         return gcj02_to_wgs84_array(coords)
     out = np.array([bd09_to_gcj02(x, y) for x, y in coords], dtype=float).reshape(-1, 2)
     return gcj02_to_wgs84_array(out)
+
+
+def output(obj, cs: str | CoordSys):
+    """把结果里所有 {lng, lat} 从 WGS84 转到目标坐标系（返回新对象，不改缓存）。"""
+    cs = CoordSys.parse(cs)
+    if cs.base is CoordSys.WGS84:
+        return obj
+    if isinstance(obj, dict):
+        if obj.keys() == {"lng", "lat"} and obj["lng"] is not None and obj["lat"] is not None:
+            lng, lat = from_wgs84(obj["lng"], obj["lat"], cs)
+            return {"lng": round(lng, 7), "lat": round(lat, 7)}
+        return {k: output(v, cs) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [output(v, cs) for v in obj]
+    return obj

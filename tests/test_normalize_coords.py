@@ -80,3 +80,15 @@ def test_tokenizer():
     assert name_similarity("国贸大厦", "国贸大厦") == 1.0
     assert name_similarity("望京SOHO", "望京SOHO T1") > 0.8
     assert name_similarity("北京站", "上海站") < 0.5
+
+
+def test_cache_drops_results_computed_before_clear():
+    from cngeocoder.cache import LRUCache
+
+    c = LRUCache(10)
+    gen = c.generation  # 请求开始时的代号
+    c.clear()  # 计算过程中数据被修改
+    c.put("k", "stale", gen)
+    assert c.get("k") is None
+    c.put("k", "fresh", c.generation)
+    assert c.get("k") == "fresh"

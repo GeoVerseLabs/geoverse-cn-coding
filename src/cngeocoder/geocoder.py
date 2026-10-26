@@ -101,11 +101,12 @@ class Geocoder:
     def geocode(self, address: str, city: str | None = None, focus: tuple[float, float] | None = None,
                 limit: int = 1, use_fallback: bool = True) -> dict:
         key = (address, city, focus and (round(focus[0], 3), round(focus[1], 3)), limit, use_fallback)
+        gen = self.cache.generation
         hit = self.cache.get(key)
         if hit is not None:
             return hit
         res = self._geocode(address, city, focus, limit, use_fallback)
-        self.cache.put(key, res)
+        self.cache.put(key, res, gen)
         return res
 
     def _geocode(self, address, city, focus, limit, use_fallback) -> dict:

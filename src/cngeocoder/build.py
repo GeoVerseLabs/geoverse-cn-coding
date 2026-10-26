@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -30,7 +31,7 @@ from .colloquial import abbreviations
 from .geo import haversine
 from .normalize import normalize
 from .parser import AddressParser
-from .store import SCHEMA, SCHEMA_VERSION, region_tokens
+from .store import SCHEMA, SCHEMA_VERSION, UID_INDEX, region_tokens
 from .tokenizer import index_text
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class BuildInputs:
     places: tuple[str, ...] = ()
     roads: tuple[str, ...] = ()
     memory: tuple[str, ...] = ()  # 历史确认结果（签收坐标、人工核验、兜底审核通过）CSV/JSONL
+    edits: tuple[str, ...] = ()  # 在线编辑的变更日志（cngeocoder edits export 导出的 JSONL），建库最后重放
     coordsys: str = "wgs84"
     simplify: float = 0.0001  # 边界简化容差（度，约 10 米）
 
@@ -116,6 +118,129 @@ def _transform_geom(geom, src: str):
     return shapely.transform(geom, lambda a: coords.to_wgs84_array(a, src))
 
 
+def _uid(*parts) -> str:
+    """没有显式 uid 的要素按内容生成稳定 uid：同一来源、同样内容的行每次建库 uid 不变，在线编辑可按 uid 重放。"""
+    h = hashlib.sha1("\x1f".join("" if p is None else str(p) for p in parts).encode("utf-8")).hexdigest()
+    return h[:16]
+
+
+class PlaceIndexer:
+    """把一行 POI/门牌输入或一条道路转换成 place / place_fts / place_rtree 三张表的行。
+
+    离线建库和在线编辑共用，保证两条路径写出的数据完全一致（在线编辑的变更日志在下次建库时重放）。
+    """
+
+    def __init__(self, index: AdminIndex, bindex: BoundaryIndex | None = None, coordsys: str = "wgs84"):
+        self.index = index
+        self.by_code = index.by_code
+        self.parser = AddressParser(index)
+        self.bindex = bindex
+        self.coordsys = coordsys
+
+    def admin_code(self, row: dict, address: str | None, lng: float, lat: float) -> tuple[str | None, object]:
+        """确定要素所属行政区：显式编码 > 解析地址 > 边界点落面。返回 (编码, 解析结果)。"""
+        raw = _pick(row, "adcode")
+        parsed = None
+        if raw:
+            try:
+                c = native_code(raw)
+                if c in self.by_code:
+                    return c, None
+            except ValueError:
+                pass
+        text = "".join(v for v in (_pick(row, "province"), _pick(row, "city"), _pick(row, "district"), address) if v)
+        cand = None
+        if text:
+            parsed = self.parser.parse(text, alternatives=0)
+            a = parsed.town or parsed.district
+            cand = a.code if a is not None else parsed.region_code
+        pip = self.bindex.locate(lng, lat) if self.bindex else None
+        if pip and cand:
+            # 文本和坐标一致时取更细的一级；冲突时相信坐标
+            return (cand if cand.startswith(pip) else pip), parsed
+        return pip or cand, parsed
+
+    def prefixes(self, code: str | None) -> tuple[str, ...]:
+        """要素所属省、市、区县的名称与简称，用于生成“去掉城市前缀”的别名。"""
+        if not code:
+            return ()
+        out: list[str] = []
+        for level, a in self.index.lineage(code).items():
+            if level <= 3:
+                out.append(a.name)
+                out.extend(short_names(a.name, level))
+        return tuple(out)
+
+    def point(self, row: dict, pid: int, source: str) -> tuple[tuple, tuple, tuple]:
+        """POI / 门牌点。坐标缺失或非法时抛 ValueError。"""
+        try:
+            lng, lat = float(_pick(row, "lng")), float(_pick(row, "lat"))
+        except (TypeError, ValueError) as e:
+            raise ValueError("缺少坐标或坐标格式错误") from e
+        if not (-180 <= lng <= 180 and -90 <= lat <= 90):
+            raise ValueError("经纬度超出范围")
+        lng, lat = coords.to_wgs84(lng, lat, _pick(row, "coordsys") or self.coordsys)
+        name = normalize(_pick(row, "name") or "") or None
+        address = _pick(row, "address")
+        code, parsed = self.admin_code(row, address, lng, lat)
+        road = normalize(_pick(row, "road") or "") or None
+        road_no = normalize(_pick(row, "road_no") or "") or None
+        if parsed is None and address and (road is None or name is None):
+            parsed = self.parser.parse(address, alternatives=0)
+        if parsed is not None:
+            road = road or parsed.road
+            road_no = road_no or parsed.road_no
+            if name is None and parsed.poi and not road_no:
+                name = parsed.poi
+        if road_no and road_no.isdigit():
+            road_no += "号"
+        road_no_num = None
+        if road_no:
+            digits = "".join(ch if ch.isdigit() else " " for ch in road_no).split()
+            road_no_num = int(digits[0]) if digits else None
+        kind = (_pick(row, "kind") or ("address" if road_no and not name else "poi")).lower()
+        district = code[:6] if code and len(code) >= 6 else None
+        weight = float(_pick(row, "weight") or 0)
+        addr_detail = parsed.detail if parsed is not None else (normalize(address) if address else "")
+        raw_alias = _pick(row, "alias") or ""
+        if isinstance(raw_alias, (list, tuple)):
+            raw_alias = "|".join(str(a) for a in raw_alias)
+        aliases = [normalize(a) for a in str(raw_alias).replace("；", "|").replace(";", "|").split("|")]
+        alias = "|".join(a for a in aliases if a) or None
+        abbr = "|".join(a for a in abbreviations(name, self.prefixes(code)) if a not in aliases) or None \
+            if name else None
+        address_n = normalize(address) if address else None
+        uid = str(row.get("uid") or "").strip() or _uid(source, kind, name, road, road_no, round(lng, 6), round(lat, 6))
+        place = (pid, kind, name, road, road_no, road_no_num, code, district, address_n, lng, lat, None, weight,
+                 source, alias, abbr, uid)
+        fts = (pid, region_tokens(code), index_text(name, *(alias or "").split("|"), *(abbr or "").split("|")),
+               index_text(road, addr_detail))
+        return place, fts, (pid, lng, lng, lat, lat)
+
+    def road(self, props: dict, geometry: dict, pid: int, source: str) -> tuple[tuple, tuple, tuple]:
+        """道路线要素。名称缺失或几何不是线时抛 ValueError。"""
+        name = normalize(_pick(props, "name") or _pick(props, "road") or "")
+        if not name:
+            raise ValueError("道路缺少名称")
+        if not geometry:
+            raise ValueError("道路缺少几何")
+        geom = _transform_geom(shape(geometry), props.get("coordsys") or self.coordsys)
+        if geom.geom_type not in ("LineString", "MultiLineString"):
+            raise ValueError("道路几何应为 LineString / MultiLineString")
+        mid = shapely.line_interpolate_point(geom, 0.5, normalized=True) if geom.geom_type == "LineString" \
+            else geom.representative_point()
+        code, _ = self.admin_code(props, None, mid.x, mid.y)
+        if code is None and self.bindex:
+            code = self.bindex.locate(mid.x, mid.y)
+        minx, miny, maxx, maxy = geom.bounds
+        district = code[:6] if code and len(code) >= 6 else None
+        wkb = shapely.to_wkb(geom)
+        uid = str(props.get("uid") or "").strip() or _uid(source, "road", name, hashlib.sha1(wkb).hexdigest())
+        place = (pid, "road", name, name, None, None, code, district, None, mid.x, mid.y, wkb,
+                 float(_pick(props, "weight") or 0), source, None, None, uid)
+        return place, (pid, region_tokens(code), index_text(name), ""), (pid, minx, maxx, miny, maxy)
+
+
 class Builder:
     def __init__(self, inp: BuildInputs):
         self.inp = inp
@@ -152,18 +277,23 @@ class Builder:
         self.stats["boundary"] = len(boundaries)
 
         index = AdminIndex(admins, aliases)
-        self.index = index
-        self.parser = AddressParser(index)
-        self.bindex = BoundaryIndex.from_wkb(
+        bindex = BoundaryIndex.from_wkb(
             (c, self.by_code[c].level, wkb) for c, wkb in boundaries.items()) if boundaries else None
+        self.indexer = PlaceIndexer(index, bindex, coordsys=inp.coordsys)
+        self.parser = self.indexer.parser
 
         next_id = 1
         for path in inp.places:
             next_id = self._load_places(db, path, next_id)
         for path in inp.roads:
             next_id = self._load_roads(db, path, next_id)
+        self._index_uids(db)
         if inp.memory:
             self._load_memory(db, inp.memory)
+        if inp.edits:
+            from .edit import replay
+
+            self.stats["edits"], next_id = replay(db, self.indexer, inp.edits, next_id)
 
         db.execute("INSERT INTO place_fts(place_fts) VALUES ('optimize')")
         common = self._common_tokens(db)
@@ -174,6 +304,8 @@ class Builder:
             "admin_source": os.path.abspath(inp.admin_dir),
             "stats": json.dumps(self.stats, ensure_ascii=False),
             "common_tokens": json.dumps(common, ensure_ascii=False),
+            "place_seq": str(next_id),  # 下一个要素 id；在线编辑只增不复用（全文索引里删除的旧 id 不能被新要素占用）
+            "edit_version": "0",
         }
         db.executemany("INSERT INTO meta VALUES (?,?)", list(meta.items()))
         db.commit()
@@ -228,73 +360,32 @@ class Builder:
                 cs = _pick(row, "coordsys") or self.inp.coordsys
                 a.lng, a.lat = (round(v, 6) for v in coords.to_wgs84(lng, lat, cs))
 
-    def _admin_code(self, row: dict, address: str | None, lng: float, lat: float) -> tuple[str | None, object]:
-        """确定要素所属行政区：显式编码 > 解析地址 > 边界点落面。返回 (编码, 解析结果)。"""
-        raw = _pick(row, "adcode")
-        parsed = None
-        if raw:
-            try:
-                c = native_code(raw)
-                if c in self.by_code:
-                    return c, None
-            except ValueError:
-                pass
-        text = "".join(v for v in (_pick(row, "province"), _pick(row, "city"), _pick(row, "district"), address) if v)
-        cand = None
-        if text:
-            parsed = self.parser.parse(text, alternatives=0)
-            a = parsed.town or parsed.district
-            cand = a.code if a is not None else parsed.region_code
-        pip = self.bindex.locate(lng, lat) if self.bindex else None
-        if pip and cand:
-            # 文本和坐标一致时取更细的一级；冲突时相信坐标
-            return (cand if cand.startswith(pip) else pip), parsed
-        return pip or cand, parsed
+    # ----------------------------------------------------------------- POI / 门牌 / 道路
+    @staticmethod
+    def _index_uids(db: sqlite3.Connection) -> None:
+        """内容完全相同的行会生成相同 uid：按导入顺序给第 2 个起追加 ~2、~3（输入不变时结果稳定），再建唯一索引。"""
+        db.execute("""
+            WITH d AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY uid ORDER BY id) AS k FROM place)
+            UPDATE place SET uid = uid || '~' || (SELECT k FROM d WHERE d.id = place.id)
+            WHERE id IN (SELECT id FROM d WHERE k > 1)""")
+        try:
+            db.execute(UID_INDEX)
+        except sqlite3.IntegrityError as e:
+            raise ValueError("要素 uid 重复：检查输入数据里显式给出的 uid 列") from e
 
-    # ----------------------------------------------------------------- POI / 门牌
     def _load_places(self, db: sqlite3.Connection, path: str, next_id: int) -> int:
         place_rows, fts_rows, rtree_rows = [], [], []
         n = 0
+        source = os.path.basename(path)
         for row in _iter_rows(path):
             try:
-                lng, lat = float(_pick(row, "lng")), float(_pick(row, "lat"))
-            except (TypeError, ValueError):
+                place, fts, rt = self.indexer.point(row, next_id, source)
+            except ValueError:
                 self.stats["skipped"] = self.stats.get("skipped", 0) + 1
                 continue
-            lng, lat = coords.to_wgs84(lng, lat, _pick(row, "coordsys") or self.inp.coordsys)
-            name = normalize(_pick(row, "name") or "") or None
-            address = _pick(row, "address")
-            code, parsed = self._admin_code(row, address, lng, lat)
-            road = normalize(_pick(row, "road") or "") or None
-            road_no = normalize(_pick(row, "road_no") or "") or None
-            if parsed is None and address and (road is None or name is None):
-                parsed = self.parser.parse(address, alternatives=0)
-            if parsed is not None:
-                road = road or parsed.road
-                road_no = road_no or parsed.road_no
-                if name is None and parsed.poi and not road_no:
-                    name = parsed.poi
-            if road_no and road_no.isdigit():
-                road_no += "号"
-            road_no_num = None
-            if road_no:
-                digits = "".join(ch if ch.isdigit() else " " for ch in road_no).split()
-                road_no_num = int(digits[0]) if digits else None
-            kind = (_pick(row, "kind") or ("address" if road_no and not name else "poi")).lower()
-            district = code[:6] if code and len(code) >= 6 else None
-            weight = float(_pick(row, "weight") or 0)
-            addr_detail = parsed.detail if parsed is not None else (normalize(address) if address else "")
-            aliases = [normalize(a) for a in str(_pick(row, "alias") or "").replace("；", "|").replace(";", "|").split("|")]
-            alias = "|".join(a for a in aliases if a) or None
-            abbr = "|".join(a for a in abbreviations(name, self._prefixes(code)) if a not in aliases) or None \
-                if name else None
-            place_rows.append((next_id, kind, name, road, road_no, road_no_num, code, district,
-                               normalize(address) if address else None, lng, lat, None, weight,
-                               os.path.basename(path), alias, abbr))
-            fts_rows.append((next_id, region_tokens(code),
-                             index_text(name, *(alias or "").split("|"), *(abbr or "").split("|")),
-                             index_text(road, addr_detail)))
-            rtree_rows.append((next_id, lng, lng, lat, lat))
+            place_rows.append(place)
+            fts_rows.append(fts)
+            rtree_rows.append(rt)
             next_id += 1
             n += 1
             if len(place_rows) >= 20000:
@@ -306,26 +397,15 @@ class Builder:
     def _load_roads(self, db: sqlite3.Connection, path: str, next_id: int) -> int:
         place_rows, fts_rows, rtree_rows = [], [], []
         n = 0
+        source = os.path.basename(path)
         for f in _iter_geojson(path):
-            props = f.get("properties") or {}
-            name = normalize(_pick(props, "name") or _pick(props, "road") or "")
-            if not name or not f.get("geometry"):
+            try:
+                place, fts, rt = self.indexer.road(f.get("properties") or {}, f.get("geometry"), next_id, source)
+            except ValueError:
                 continue
-            geom = _transform_geom(shape(f["geometry"]), props.get("coordsys") or self.inp.coordsys)
-            if geom.geom_type not in ("LineString", "MultiLineString"):
-                continue
-            mid = shapely.line_interpolate_point(geom, 0.5, normalized=True) if geom.geom_type == "LineString" \
-                else geom.representative_point()
-            code, _ = self._admin_code(props, None, mid.x, mid.y)
-            if code is None and self.bindex:
-                code = self.bindex.locate(mid.x, mid.y)
-            minx, miny, maxx, maxy = geom.bounds
-            district = code[:6] if code and len(code) >= 6 else None
-            place_rows.append((next_id, "road", name, name, None, None, code, district, None,
-                               mid.x, mid.y, shapely.to_wkb(geom), float(_pick(props, "weight") or 0),
-                               os.path.basename(path), None, None))
-            fts_rows.append((next_id, region_tokens(code), index_text(name), ""))
-            rtree_rows.append((next_id, minx, maxx, miny, maxy))
+            place_rows.append(place)
+            fts_rows.append(fts)
+            rtree_rows.append(rt)
             next_id += 1
             n += 1
         self._flush(db, place_rows, fts_rows, rtree_rows)
@@ -342,17 +422,6 @@ class Builder:
         db.execute("DROP TABLE temp.fts_vocab")
         self.stats["common_tokens"] = len(rows)
         return [r[0] for r in rows]
-
-    def _prefixes(self, code: str | None) -> tuple[str, ...]:
-        """要素所属省、市、区县的名称与简称，用于生成“去掉城市前缀”的别名。"""
-        if not code:
-            return ()
-        out: list[str] = []
-        for level, a in self.index.lineage(code).items():
-            if level <= 3:
-                out.append(a.name)
-                out.extend(short_names(a.name, level))
-        return tuple(out)
 
     def _load_memory(self, db: sqlite3.Connection, paths: tuple[str, ...]) -> None:
         """历史确认结果：同一写法的多次确认取中位点，离散度大的（多处签收）降低可信度。"""
@@ -390,7 +459,7 @@ class Builder:
     def _flush(db, place_rows: list, fts_rows: list, rtree_rows: list) -> None:
         if not place_rows:
             return
-        db.executemany("INSERT INTO place VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", place_rows)
+        db.executemany(f"INSERT INTO place VALUES ({','.join('?' * 17)})", place_rows)
         db.executemany("INSERT INTO place_fts(rowid, region, name, addr) VALUES (?,?,?,?)", fts_rows)
         db.executemany("INSERT INTO place_rtree VALUES (?,?,?,?,?)", rtree_rows)
         place_rows.clear()

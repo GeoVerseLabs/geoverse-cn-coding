@@ -16,6 +16,11 @@ services:
       GEOCODER_MIN_CONFIDENCE: "0.6"
       # GEOCODER_DB: /data/geocoder.db
       # GEOCODER_REVIEW_LOG: /data/review.jsonl
+      # GEOCODER_FEEDBACK_LOG: /data/feedback.jsonl
+      # 鉴权：cngeocoder keygen --name ops --role admin 生成，只填 sha256 哈希
+      GEOCODER_API_KEYS: ${GEOCODER_API_KEYS:-}
+      # 在线编辑（管理界面 /admin、MCP 维护工具）：需要挂载可写的 /data 并使用其中的数据文件
+      # GEOCODER_EDITABLE: "1"
     # volumes:
     #   - ./var:/data
     restart: unless-stopped

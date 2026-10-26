@@ -1,4 +1,4 @@
-"""命令行：建库、解析、正向/逆向编码、评测、启动服务。"""
+"""命令行：建库、解析、正向/逆向编码、评测、启动服务、MCP（stdio）、密钥生成、变更日志导出。"""
 
 from __future__ import annotations
 
@@ -13,12 +13,14 @@ def _dump(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
-def _engine(args):
+def _engine(args, editable: bool | None = None):
     from .engine import Engine, Settings
 
     s = Settings.from_env()
     if args.db:
         s.db_path = args.db
+    if editable is not None:
+        s.editable = editable
     return Engine(s)
 
 
@@ -29,7 +31,7 @@ def cmd_build(args) -> int:
         admin_dir=args.admin_dir, out=args.out, aliases=tuple(args.aliases or ()),
         boundaries=tuple(args.boundaries or ()), centroids=tuple(args.centroids or ()),
         places=tuple(args.places or ()), roads=tuple(args.roads or ()), memory=tuple(args.memory or ()),
-        coordsys=args.coordsys,
+        edits=tuple(args.edits or ()), coordsys=args.coordsys,
         simplify=args.simplify,
     ))
     _dump(stats)
@@ -53,24 +55,20 @@ def cmd_parse(args) -> int:
 
 
 def cmd_geocode(args) -> int:
-    from .api import _out
-    from .coords import CoordSys
+    from .coords import output
 
     eng = _engine(args)
-    cs = CoordSys.parse(args.coordsys)
     for a in args.address:
-        _dump(_out(eng.geocoder.geocode(a, city=args.city, limit=args.limit), cs))
+        _dump(output(eng.geocoder.geocode(a, city=args.city, limit=args.limit), args.coordsys))
     return 0
 
 
 def cmd_reverse(args) -> int:
-    from .api import _out
-    from .coords import CoordSys, to_wgs84
+    from .coords import output, to_wgs84
 
     eng = _engine(args)
-    cs = CoordSys.parse(args.coordsys)
-    lng, lat = to_wgs84(args.lng, args.lat, cs)
-    _dump(_out(eng.reverse.reverse(lng, lat, radius=args.radius), cs))
+    lng, lat = to_wgs84(args.lng, args.lat, args.coordsys)
+    _dump(output(eng.reverse.reverse(lng, lat, radius=args.radius), args.coordsys))
     return 0
 
 
@@ -105,6 +103,49 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_mcp(args) -> int:
+    from .auth import Principal
+    from .mcp_server import McpServer, serve_stdio
+
+    # stdio 由本机 agent 以子进程启动，信任边界是操作系统用户，角色由启动参数决定
+    eng = _engine(args, editable=True if args.role == "admin" and args.editable else None)
+    serve_stdio(McpServer(eng), Principal(name=args.name, role=args.role))
+    return 0
+
+
+def cmd_keygen(args) -> int:
+    from .auth import keygen_line
+
+    k = keygen_line(args.name, args.role)
+    print(f"# 密钥只显示这一次，请交给调用方保存（{k['name']}，角色 {k['role']}）", file=sys.stderr)
+    print(f"key: {k['key']}")
+    print(f"GEOCODER_API_KEYS 条目: {k['env']}")
+    print(f"GEOCODER_API_KEYS_FILE（JSON）条目: {json.dumps(k['json'], ensure_ascii=False)}")
+    return 0
+
+
+def cmd_edits_export(args) -> int:
+    from .edit import _change
+    from .engine import Settings
+    from .store import Store
+
+    s = Settings.from_env()
+    # 不加载整个引擎，直接读变更日志；在线服务可能正在写，不用 immutable
+    store = Store(args.db or s.db_path, immutable=False)
+
+    out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
+    n = 0
+    try:
+        for r in store.conn().execute("SELECT seq, ts, actor, op, target, data, before FROM change_log ORDER BY seq"):
+            out.write(json.dumps(_change(r), ensure_ascii=False) + "\n")
+            n += 1
+    finally:
+        if args.out:
+            out.close()
+    print(f"导出 {n} 条变更", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     default_admin = os.environ.get("GEOCODER_ADMIN_DIR", "data/admin")
@@ -120,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--places", nargs="*", help="POI/门牌 CSV 或 GeoJSON")
     b.add_argument("--roads", nargs="*", help="道路 GeoJSON")
     b.add_argument("--memory", nargs="*", help="历史确认结果 CSV/JSONL（address,lng,lat[,coordsys,count]），含 /v1/feedback 日志")
+    b.add_argument("--edits", nargs="*", help="在线编辑的变更日志 JSONL（cngeocoder edits export 导出），建库最后按顺序重放")
     b.add_argument("--coordsys", default="wgs84", help="输入数据坐标系（行内 coordsys 列优先）")
     b.add_argument("--simplify", type=float, default=0.0001, help="边界简化容差（度）")
     b.add_argument("--out", default=os.environ.get("GEOCODER_DB", "var/geocoder.db"))
@@ -159,6 +201,24 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--workers", type=int, default=1)
     s.set_defaults(func=cmd_serve)
+
+    m = sub.add_parser("mcp", help="以 stdio 方式提供 MCP 服务（供本机 agent 以子进程启动）")
+    m.add_argument("--role", choices=["read", "admin"], default="read", help="agent 的角色：read 只读查询，admin 可维护数据")
+    m.add_argument("--name", default="mcp-stdio", help="变更日志里记录的操作人")
+    m.add_argument("--editable", action=argparse.BooleanOptionalAction, default=True,
+                   help="admin 角色时以可写方式打开数据文件（默认开启）")
+    m.set_defaults(func=cmd_mcp)
+
+    k = sub.add_parser("keygen", help="生成 API Key 及其配置条目")
+    k.add_argument("--name", required=True, help="调用方名称，如 order-service")
+    k.add_argument("--role", choices=["read", "write", "admin"], default="read")
+    k.set_defaults(func=cmd_keygen)
+
+    ed = sub.add_parser("edits", help="在线编辑的变更日志")
+    ed_sub = ed.add_subparsers(dest="edits_cmd", required=True)
+    ex = ed_sub.add_parser("export", help="导出全部变更（JSONL），下次建库时用 build --edits 重放")
+    ex.add_argument("--out", help="输出文件，默认标准输出")
+    ex.set_defaults(func=cmd_edits_export)
 
     args = ap.parse_args(argv)
     return args.func(args)

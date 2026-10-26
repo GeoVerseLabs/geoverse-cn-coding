@@ -34,11 +34,12 @@ class ReverseGeocoder:
     def reverse(self, lng: float, lat: float, radius: float = 500, poi_limit: int = 5) -> dict:
         radius = max(10.0, min(float(radius), 3000.0))
         key = (round(lng, 5), round(lat, 5), radius, poi_limit)
+        gen = self.cache.generation
         hit = self.cache.get(key)
         if hit is not None:
             return hit
         res = self._reverse(lng, lat, radius, poi_limit)
-        self.cache.put(key, res)
+        self.cache.put(key, res, gen)
         return res
 
     # ------------------------------------------------------------------ 内部
