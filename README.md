@@ -107,7 +107,7 @@ claude mcp add --transport http cngeocoder http://127.0.0.1:8000/mcp --header "A
 ```bash
 pip install -e ".[dev]"
 make data          # 内置区划 + 示例 POI 建库 → var/geocoder.db
-make test          # 142 个测试
+make test          # 154 个测试
 make serve         # http://127.0.0.1:8000/docs
 ```
 
@@ -159,7 +159,7 @@ docker run -d -p 8000:8000 -v $PWD/var:/data -e GEOCODER_DB=/data/geocoder.db \
 | `GET /admin` | 数据管理界面 |
 | `POST /mcp` | MCP 服务，见 [docs/mcp.md](docs/mcp.md) |
 
-配置了 API Key 后，请求需带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`；`/health` 始终开放。角色与配置见 [docs/auth.md](docs/auth.md)。
+配置了 API Key 后，请求需带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`；`/health` 始终开放。每个接口所需的角色写在 OpenAPI 的 `x-required-role` 里；密钥还可以限定数据范围（如只维护北京）、禁止触发兜底、单独限流。见 [docs/auth.md](docs/auth.md)。
 
 正向结果示例（示例数据，`coordsys=gcj02`）：
 

@@ -131,3 +131,24 @@ def test_stdio(editable_engine):
     assert msgs[0]["result"]["protocolVersion"] == "2025-03-26" and msgs[1]["error"]["code"] == -32700
     assert msgs[2]["result"]["structuredContent"]["name"] == "本机工具点"
     assert editable_engine.manager.list_changes()["items"][0]["actor"] == "local-agent"
+
+
+def test_stdio_principal_from_key(monkeypatch, tmp_path):
+    import argparse
+
+    from cngeocoder.auth import hash_key
+    from cngeocoder.cli import _stdio_principal
+
+    keys = tmp_path / "k.json"
+    keys.write_text(json.dumps([{"name": "bj-agent", "role": "admin", "key_sha256": hash_key(ADMIN_KEY),
+                                 "regions": ["11"], "fallback": False}]), encoding="utf-8")
+    args = argparse.Namespace(name="mcp-stdio", role="read")
+    monkeypatch.delenv("GEOCODER_API_KEY", raising=False)
+    assert _stdio_principal(args).role == "read"
+    monkeypatch.setenv("GEOCODER_API_KEYS_FILE", str(keys))
+    monkeypatch.setenv("GEOCODER_API_KEY", ADMIN_KEY)
+    p = _stdio_principal(args)
+    assert (p.name, p.role, p.regions, p.fallback) == ("bj-agent", "admin", ("11",), False)
+    monkeypatch.setenv("GEOCODER_API_KEY", "cng_not_configured_000000")
+    with pytest.raises(SystemExit):
+        _stdio_principal(args)

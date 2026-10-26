@@ -37,7 +37,8 @@ INSTRUCTIONS = """中国地址编码服务（cngeocoder）。
   用 search_regions 找区划编码（adcode）；新增 / 修改后用 geocode 验证效果；
   “某种写法应该落到某个坐标”用 add_memory（历史确认结果），而不是新建要素；
   待审核队列（兜底结果、业务反馈）用 list_review / resolve_review 处理。
-- 每次修改都记入变更日志（list_changes），带操作人，可追溯。"""
+- 每次修改都记入变更日志（list_changes），带操作人，可追溯。
+- 密钥可能只授权了部分区域（get_service_info 的 caller.regions），超出范围的修改会被拒绝。"""
 
 _COORDSYS = {"type": "string", "enum": ["wgs84", "gcj02", "bd09", "cgcs2000"],
              "description": "坐标系，默认 wgs84（高德/腾讯为 gcj02，百度为 bd09）"}
@@ -183,12 +184,12 @@ class McpServer:
             d["alternatives"] = [x.to_dict()["adcode"] for x in pa.alternatives]
             return d
 
-        def geocode(a, _p):
+        def geocode(a, p):
             focus = None
             if a.get("focus_lng") is not None and a.get("focus_lat") is not None:
                 focus = coords.to_wgs84(a["focus_lng"], a["focus_lat"], cs(a))
             r = eng.geocoder.geocode(a["address"], city=a.get("city"), focus=focus, limit=int(a.get("limit") or 1),
-                                     use_fallback=bool(a.get("fallback", False)))
+                                     use_fallback=bool(a.get("fallback", False)) and p.fallback)
             return out(r, a)
 
         def reverse(a, _p):
@@ -202,8 +203,9 @@ class McpServer:
             lng, lat = coords.convert(a["lng"], a["lat"], src, dst)
             return {"location": {"lng": round(lng, 7), "lat": round(lat, 7)}, "from": src.value, "to": dst.value}
 
-        def info(_a, _p):
+        def info(_a, p):
             d = eng.info()
+            d["caller"] = p.public()
             d.pop("db", None)  # 不向 agent 暴露服务器路径
             return d
 
@@ -216,48 +218,50 @@ class McpServer:
                 d["alias"] = "|".join(d["alias"])
             return d
 
-        def search_places(a, _p):
+        def search_places(a, p):
             r = m.list_places(a.get("q"), a.get("kind"), a.get("adcode"), a.get("source"),
-                              int(a.get("offset") or 0), int(a.get("limit") or 20))
+                              int(a.get("offset") or 0), int(a.get("limit") or 20), regions=p.regions)
             return out(r, a)
 
-        def get_place(a, _p):
-            return out(m.get_place(a["uid"]), a)
+        def get_place(a, p):
+            return out(m.get_place(a["uid"], regions=p.regions), a)
 
         def add_place(a, p):
-            return out(m.create_place(place_input(a), actor=p.name), a)
+            return out(m.create_place(place_input(a), actor=p.name, regions=p.regions), a)
 
         def update_place(a, p):
             d = place_input(a)
             uid = d.pop("uid")
             if "lng" in a or "lat" in a or "geometry" in a:
                 d["coordsys"] = cs(a)
-            return out(m.update_place(uid, d, actor=p.name), a)
+            return out(m.update_place(uid, d, actor=p.name, regions=p.regions), a)
 
         def delete_place(a, p):
-            return {"deleted": m.delete_place(a["uid"], actor=p.name)}
+            return {"deleted": m.delete_place(a["uid"], actor=p.name, regions=p.regions)}
 
-        def list_memory(a, _p):
-            return out(m.list_memory(a.get("q"), int(a.get("offset") or 0), int(a.get("limit") or 20)), a)
+        def list_memory(a, p):
+            return out(m.list_memory(a.get("q"), int(a.get("offset") or 0), int(a.get("limit") or 20),
+                                     regions=p.regions), a)
 
         def add_memory(a, p):
             rows = m.add_memory(a["address"], a["lng"], a["lat"], coordsys=cs(a), count=int(a.get("count") or 1),
-                                spread=float(a.get("spread") or 0), actor=p.name)
+                                spread=float(a.get("spread") or 0), actor=p.name, regions=p.regions)
             return out({"items": rows}, a)
 
         def delete_memory(a, p):
-            return {"deleted": m.delete_memory(a["key"], actor=p.name)}
+            return {"deleted": m.delete_memory(a["key"], actor=p.name, regions=p.regions)}
 
-        def list_review(a, _p):
+        def list_review(a, p):
             return out(m.review_items(a.get("source"), a.get("status") or "pending", int(a.get("offset") or 0),
-                                      int(a.get("limit") or 20)), a)
+                                      int(a.get("limit") or 20), regions=p.regions), a)
 
         def resolve_review(a, p):
             return out(m.resolve_review(a["id"], a["action"], a.get("lng"), a.get("lat"), coordsys=cs(a),
-                                        actor=p.name), a)
+                                        actor=p.name, regions=p.regions), a)
 
-        def list_changes(a, _p):
-            return m.list_changes(int(a.get("offset") or 0), int(a.get("limit") or 20), a.get("op"))
+        def list_changes(a, p):
+            return m.list_changes(int(a.get("offset") or 0), int(a.get("limit") or 20), a.get("op"),
+                                  actor=p.name if p.scoped else None)
 
         place_update_props = {"uid": {"type": "string", "description": "要素 uid（search_places 结果里的 uid）"},
                               **_PLACE_PROPS}

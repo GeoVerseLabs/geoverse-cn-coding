@@ -60,6 +60,31 @@ class ReadOnly(EditError):
     status = 409
 
 
+class Forbidden(EditError):
+    """超出密钥授权的数据范围（HTTP 403）。"""
+
+    status = 403
+
+
+Regions = tuple[str, ...] | None
+
+
+def _in_scope(code: str | None, regions: Regions) -> bool:
+    return not regions or (bool(code) and any(code.startswith(r) for r in regions))
+
+
+def _require_scope(code: str | None, regions: Regions, what: str) -> None:
+    if not _in_scope(code, regions):
+        raise Forbidden(f"超出授权的数据范围（{'、'.join(regions)}）：{what}"
+                        + ("" if code else "（无法确定所属行政区）"))
+
+
+def _scope_sql(regions: Regions, col: str = "adcode") -> tuple[str, list]:
+    if not regions:
+        return "", []
+    return "(" + " OR ".join(f"{col} LIKE ?" for _ in regions) + ")", [r + "%" for r in regions]
+
+
 def _split(v: str | None) -> list[str]:
     return [a for a in (v or "").split("|") if a]
 
@@ -247,8 +272,12 @@ class DataManager:
 
     # ------------------------------------------------------------ 读
     def list_places(self, q: str | None = None, kind: str | None = None, adcode: str | None = None,
-                    source: str | None = None, offset: int = 0, limit: int = 20) -> dict:
+                    source: str | None = None, offset: int = 0, limit: int = 20, regions: Regions = None) -> dict:
         where, args = [], []
+        sc, sa = _scope_sql(regions)
+        if sc:
+            where.append(sc)
+            args += sa
         if q:
             q = q.strip()
             like = f"%{q}%"
@@ -275,9 +304,9 @@ class DataManager:
         return {"total": min(total, cap), "total_capped": total > cap, "offset": offset,
                 "items": [self.view(_record(r, full=True)) for r in rows]}
 
-    def get_place(self, uid: str) -> dict:
+    def get_place(self, uid: str, regions: Regions = None) -> dict:
         r = self.store.conn().execute(_PLACE_SELECT + " WHERE uid = ?", (uid,)).fetchone()
-        if r is None:
+        if r is None or not _in_scope(r[5], regions):  # 范围外的要素按不存在处理，不泄露其存在
             raise NotFound(f"要素不存在: {uid}")
         return self.view(_record(r, full=True))
 
@@ -320,20 +349,30 @@ class DataManager:
                         "location": {"lng": a.lng, "lat": a.lat} if a.lng is not None else None})
         return out
 
-    def list_memory(self, q: str | None = None, offset: int = 0, limit: int = 20) -> dict:
-        args: list = []
-        cond = ""
+    def list_memory(self, q: str | None = None, offset: int = 0, limit: int = 20, regions: Regions = None) -> dict:
+        where, args = _scope_sql(regions)
+        where = [where] if where else []
         if q:
-            cond = " WHERE key LIKE ? OR sample LIKE ?"
-            args = [f"%{q}%", f"%{q}%"]
+            where.append("(key LIKE ? OR sample LIKE ?)")
+            args += [f"%{q}%", f"%{q}%"]
+        cond = (" WHERE " + " AND ".join(where)) if where else ""
         c = self.store.conn()
         total = c.execute("SELECT COUNT(*) FROM memory" + cond, args).fetchone()[0]
         rows = c.execute("SELECT key, lng, lat, n, spread, adcode, sample FROM memory" + cond +
                          " ORDER BY rowid DESC LIMIT ? OFFSET ?", [*args, limit, offset])
         return {"total": total, "offset": offset, "items": [_memory(r) for r in rows]}
 
-    def list_changes(self, offset: int = 0, limit: int = 50, op: str | None = None) -> dict:
-        cond, args = (" WHERE op = ?", [op]) if op else ("", [])
+    def list_changes(self, offset: int = 0, limit: int = 50, op: str | None = None,
+                     actor: str | None = None) -> dict:
+        """actor 不为空时只看该操作人的记录（区域管理员只能看自己的修改）。"""
+        where, args = [], []
+        if op:
+            where.append("op = ?")
+            args.append(op)
+        if actor:
+            where.append("actor = ?")
+            args.append(actor)
+        cond = (" WHERE " + " AND ".join(where)) if where else ""
         c = self.store.conn()
         total = c.execute("SELECT COUNT(*) FROM change_log" + cond, args).fetchone()[0]
         rows = c.execute("SELECT seq, ts, actor, op, target, data, before FROM change_log" + cond +
@@ -353,14 +392,16 @@ class DataManager:
         return {"review": s.review_log, "feedback": s.feedback_log}
 
     def review_items(self, source: str | None = None, status: str = "pending", offset: int = 0,
-                     limit: int = 20) -> dict:
+                     limit: int = 20, regions: Regions = None) -> dict:
         """兜底结果（GEOCODER_REVIEW_LOG）与业务反馈（GEOCODER_FEEDBACK_LOG）合并成一个待审核队列。"""
         states = {r[0]: (r[1], r[2], r[3]) for r in self.store.conn().execute("SELECT * FROM review_state")}
         items = []
         for src, path in self._queue_files().items():
             if source and src != source:
                 continue
-            for item in _read_queue(src, path):
+            for item in self._queue(src, path):
+                if not _in_scope(item["adcode"], regions):
+                    continue
                 st = states.get(item["id"])
                 item["status"] = st[0] if st else "pending"
                 if st:
@@ -371,10 +412,18 @@ class DataManager:
         enabled = {k: bool(v) for k, v in self._queue_files().items()}
         return {"total": len(items), "offset": offset, "enabled": enabled, "items": items[offset:offset + limit]}
 
-    def _review_item(self, item_id: str) -> dict:
+    def _queue(self, source: str, path: str | None) -> Iterator[dict]:
+        """读队列文件；没有区划编码的条目（业务反馈）按地址解析补上，用于显示和数据范围判断。"""
+        for item in _read_queue(source, path):
+            if not item["adcode"] and item["address"]:
+                p = self.indexer.parser.parse(item["address"], alternatives=0)
+                item["adcode"] = p.district.code if p.district else p.region_code
+            yield item
+
+    def _review_item(self, item_id: str, regions: Regions = None) -> dict:
         for src, path in self._queue_files().items():
-            for item in _read_queue(src, path):
-                if item["id"] == item_id:
+            for item in self._queue(src, path):
+                if item["id"] == item_id and _in_scope(item["adcode"], regions):
                     return item
         raise NotFound(f"待审核条目不存在: {item_id}")
 
@@ -434,7 +483,7 @@ class DataManager:
             v["warnings"] = w
         return v
 
-    def create_place(self, data: dict, actor: str | None = None) -> dict:
+    def create_place(self, data: dict, actor: str | None = None, regions: Regions = None) -> dict:
         if data.get("uid"):
             r = self.store.conn().execute("SELECT 1 FROM place WHERE uid = ?", (data["uid"],)).fetchone()
             if r:
@@ -442,23 +491,29 @@ class DataManager:
 
         def fn(w: Writer):
             after, _ = w.place_upsert(data)
+            _require_scope(after["adcode"], regions, f"新要素位于 {self.region_name(after['adcode']) or '未知区域'}")
             w.log("place.upsert", after["uid"], _journal(after), None, actor)
             return after
 
         return self._with_warnings(self._tx(fn, actor))
 
-    def update_place(self, uid: str, patch: dict, actor: str | None = None) -> dict:
+    def update_place(self, uid: str, patch: dict, actor: str | None = None, regions: Regions = None) -> dict:
         def fn(w: Writer):
-            if w.place_record(uid) is None:
+            cur = w.place_record(uid)
+            if cur is None or not _in_scope(cur.get("adcode"), regions):
                 raise NotFound(f"要素不存在: {uid}")
             after, before = w.place_upsert({**patch, "uid": uid})
+            _require_scope(after["adcode"], regions, f"修改后位于 {self.region_name(after['adcode']) or '未知区域'}")
             w.log("place.upsert", uid, _journal(after), _journal(before), actor)
             return after
 
         return self._with_warnings(self._tx(fn, actor))
 
-    def delete_place(self, uid: str, actor: str | None = None) -> dict:
+    def delete_place(self, uid: str, actor: str | None = None, regions: Regions = None) -> dict:
         def fn(w: Writer):
+            cur = w.place_record(uid)
+            if cur is not None and not _in_scope(cur.get("adcode"), regions):
+                raise NotFound(f"要素不存在: {uid}")
             before = w.place_delete(uid)
             w.log("place.delete", uid, {"uid": uid}, _journal(before), actor)
             return before
@@ -466,9 +521,10 @@ class DataManager:
         return self.view(self._tx(fn, actor))
 
     def add_memory(self, address: str, lng: float, lat: float, coordsys: str = "wgs84", count: int = 1,
-                   spread: float = 0.0, actor: str | None = None) -> list[dict]:
+                   spread: float = 0.0, actor: str | None = None, regions: Regions = None) -> list[dict]:
         def fn(w: Writer):
             rows, before = w.memory_upsert(address, lng, lat, count, spread, coordsys=coordsys)
+            _require_scope(rows[0]["adcode"], regions, f"地址“{address}”")
             data = {"address": address, "lng": rows[0]["location"]["lng"], "lat": rows[0]["location"]["lat"],
                     "count": count, "spread": spread}
             w.log("memory.upsert", address, data, before or None, actor)
@@ -476,8 +532,11 @@ class DataManager:
 
         return self._tx(fn, actor)
 
-    def delete_memory(self, key: str, actor: str | None = None) -> dict:
+    def delete_memory(self, key: str, actor: str | None = None, regions: Regions = None) -> dict:
         def fn(w: Writer):
+            cur = w.memory_get(key)
+            if cur is not None and not _in_scope(cur["adcode"], regions):
+                raise NotFound(f"确认结果不存在: {key}")
             before = w.memory_delete(key)
             w.log("memory.delete", key, {"key": key}, before, actor)
             return before
@@ -485,11 +544,11 @@ class DataManager:
         return self._tx(fn, actor)
 
     def resolve_review(self, item_id: str, action: str, lng: float | None = None, lat: float | None = None,
-                       coordsys: str = "wgs84", actor: str | None = None) -> dict:
+                       coordsys: str = "wgs84", actor: str | None = None, regions: Regions = None) -> dict:
         """审核通过：写入历史确认结果（可改坐标），同样的写法下次直接命中；驳回：只标记状态。"""
         if action not in ("approve", "dismiss"):
             raise EditError("action 只能是 approve 或 dismiss")
-        item = self._review_item(item_id)
+        item = self._review_item(item_id, regions)
         status = "approved" if action == "approve" else "dismissed"
 
         def fn(w: Writer):
@@ -500,6 +559,7 @@ class DataManager:
                 else:
                     x, y = item["location"]["lng"], item["location"]["lat"]
                 rows, before = w.memory_upsert(item["address"], x, y)
+                _require_scope(rows[0]["adcode"], regions, f"地址“{item['address']}”")
                 w.log("memory.upsert", item["address"], {"address": item["address"], "lng": round(x, 7),
                                                           "lat": round(y, 7), "count": 1, "spread": 0.0},
                       before or None, actor)

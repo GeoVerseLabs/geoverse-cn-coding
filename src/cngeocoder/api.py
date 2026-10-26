@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.routing import APIRoute
 from fastapi.security import APIKeyHeader, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,42 @@ _STATIC = Path(__file__).parent / "static"
 # 只用于在 /docs 里显示“Authorize”按钮；实际取密钥在 _principal 里统一处理
 _bearer = HTTPBearer(auto_error=False, description="API Key：Authorization: Bearer <key>")
 _api_key = APIKeyHeader(name="X-API-Key", auto_error=False, description="API Key：X-API-Key: <key>")
+
+
+# 不需要鉴权的接口（路径, 方法）。其余每个接口都必须声明角色，tests/test_auth.py 会逐个检查
+PUBLIC_ROUTES = {("/health", "GET"), ("/admin", "GET"), ("/admin/", "GET"), ("/mcp", "GET"), ("/mcp", "DELETE")}
+
+
+def _requirement(dependant) -> tuple[str, bool] | None:
+    """在接口的依赖树里找 need() 声明的角色要求。"""
+    for d in dependant.dependencies:
+        req = getattr(d.call, "_auth", None) or _requirement(d)
+        if req:
+            return req
+    return None
+
+
+class AuthRoute(APIRoute):
+    """先鉴权、再解析参数和请求体：未授权的请求一律先得到 401 / 403 / 429，拿不到 422 之类的校验信息，
+    也不消耗请求体解析。角色写进 OpenAPI 的 x-required-role。"""
+
+    def __init__(self, path: str, endpoint, **kw):
+        super().__init__(path, endpoint, **kw)
+        self.auth = _requirement(self.dependant)
+        if self.auth:
+            role, global_only = self.auth
+            self.openapi_extra = {**(self.openapi_extra or {}), "x-required-role": role,
+                                  **({"x-global-admin-only": True} if global_only else {})}
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def guarded(request: Request) -> Response:
+            if self.auth is not None:
+                request.app.state.authorize(request, *self.auth)
+            return await handler(request)
+
+        return guarded
 
 
 def _cs(value: str | None) -> coords.CoordSys:
@@ -158,6 +195,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     app = FastAPI(title="GeoVerse 中国地址编码服务", version=__version__, lifespan=lifespan,
                   docs_url="/docs" if docs else None, redoc_url="/redoc" if docs else None,
                   openapi_url="/openapi.json" if docs else None)
+    app.router.route_class = AuthRoute
     app.state.keyring = ring
 
     @app.exception_handler(AuthError)
@@ -173,22 +211,32 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         e.sync()
         return e
 
-    def _principal(request: Request, role: str) -> Principal:
+    def _principal(request: Request, role: str, global_only: bool = False) -> Principal:
         token = token_from(request.headers)
         if token is None and ring.allow_query_key:
             token = request.query_params.get("key") or None
         client = request.client.host if request.client else "unknown"
-        p = ring.check(token, client, role)
+        p = ring.check(token, client, role, global_only)
         request.state.principal = p
         return p
 
-    def need(role: str):
-        def dep(request: Request, _b=Depends(_bearer), _k=Depends(_api_key)) -> Principal:
-            return _principal(request, role)
+    app.state.authorize = _principal
 
+    def need(role: str, global_only: bool = False):
+        """声明接口需要的角色。实际检查在 AuthRoute 里、解析请求之前完成，这里只取出结果。"""
+
+        def dep(request: Request, _b=Depends(_bearer), _k=Depends(_api_key)) -> Principal:
+            p = getattr(request.state, "principal", None)
+            return p if p is not None else _principal(request, role, global_only)
+
+        dep._auth = (role, global_only)
         return Depends(dep)
 
-    read, write, admin = need("read"), need("write"), need("admin")
+    read, write, admin, root = need("read"), need("write"), need("admin"), need("admin", global_only=True)
+
+    def charge(p: Principal, n: int) -> None:
+        """批量接口按条数计入限流。"""
+        ring.charge(p, n)
 
     @app.get("/health")
     def health() -> dict:
@@ -200,8 +248,11 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         return {**p.public(), "auth_enabled": ring.enabled}
 
     @app.get("/v1/meta")
-    def meta(_p: Principal = read) -> dict:
-        return eng().info()
+    def meta(p: Principal = read) -> dict:
+        info = eng().info()
+        if not (p.allows("admin") and not p.scoped):
+            info.pop("db", None)  # 服务器上的文件路径只给全局管理员看
+        return info
 
     @app.get("/v1/parse")
     def parse(address: str = Query(..., min_length=1, max_length=500), city: str | None = None,
@@ -214,21 +265,25 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     @app.get("/v1/geocode")
     def geocode(address: str = Query(..., min_length=1, max_length=500), city: str | None = None,
                 coordsys: str | None = None, focus: str | None = None, limit: int = Query(1, ge=1, le=10),
-                fallback: bool = True, _p: Principal = read) -> dict:
+                fallback: bool = True, p: Principal = read) -> dict:
         cs = _cs(coordsys)
         f = None
         if focus:
             f = coords.to_wgs84(*_location(focus), cs)
-        res = eng().geocoder.geocode(address, city=city, focus=f, limit=limit, use_fallback=fallback)
-        return {**_out(res, cs), "coordsys": cs.value}
+        res = eng().geocoder.geocode(address, city=city, focus=f, limit=limit, use_fallback=fallback and p.fallback)
+        out = {**_out(res, cs), "coordsys": cs.value}
+        if fallback and not p.fallback:
+            out["fallback_permitted"] = False  # 该密钥（或匿名调用方）不允许消耗兜底服务配额
+        return out
 
     @app.post("/v1/geocode/batch")
-    def geocode_batch(body: GeocodeBatch, _p: Principal = read) -> dict:
+    def geocode_batch(body: GeocodeBatch, p: Principal = read) -> dict:
+        charge(p, len(body.items))
         cs = _cs(body.coordsys)
         g = eng().geocoder
         out = []
         for it in body.items:
-            r = g.geocode(it.address, city=it.city, limit=body.limit)
+            r = g.geocode(it.address, city=it.city, limit=body.limit, use_fallback=p.fallback)
             out.append({"id": it.id, **_out(r, cs)})
         return {"coordsys": cs.value, "count": len(out), "items": out}
 
@@ -241,7 +296,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         return {**_out(res, cs), "coordsys": cs.value}
 
     @app.post("/v1/reverse/batch")
-    def reverse_batch(body: ReverseBatch, _p: Principal = read) -> dict:
+    def reverse_batch(body: ReverseBatch, p: Principal = read) -> dict:
+        charge(p, len(body.items))
         cs = _cs(body.coordsys)
         rv = eng().reverse
         out = []
@@ -283,28 +339,31 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         info = e.info()
         info["review"] = {k: bool(v) for k, v in
                           (("review", e.settings.review_log), ("feedback", e.settings.feedback_log))}
-        info["review"]["pending"] = e.manager.review_items(limit=0)["total"]
-        return {**info, "whoami": p.public(), "auth": ring.describe(), "mcp": {"path": "/mcp",
-                                                                               "protocol_versions": PROTOCOL_VERSIONS}}
+        info["review"]["pending"] = e.manager.review_items(limit=0, regions=p.regions)["total"]
+        if p.scoped:
+            info.pop("db", None)
+        return {**info, "whoami": p.public(), "auth": None if p.scoped else ring.describe(),
+                "mcp": {"path": "/mcp", "protocol_versions": PROTOCOL_VERSIONS}}
 
     @app.get("/v1/admin/places", tags=["admin"])
     def admin_places(q: str | None = Query(None, max_length=100), kind: str | None = None,
                      adcode: str | None = None, source: str | None = None, offset: int = Query(0, ge=0),
                      limit: int = Query(20, ge=1, le=200), coordsys: str | None = None,
-                     _p: Principal = admin) -> dict:
+                     p: Principal = admin) -> dict:
         cs = _cs(coordsys)
-        return {**_out(mgr().list_places(q, kind, adcode, source, offset, limit), cs), "coordsys": cs.value}
+        res = mgr().list_places(q, kind, adcode, source, offset, limit, regions=p.regions)
+        return {**_out(res, cs), "coordsys": cs.value}
 
     @app.get("/v1/admin/places/{uid}", tags=["admin"])
-    def admin_place(uid: str, coordsys: str | None = None, _p: Principal = admin) -> dict:
+    def admin_place(uid: str, coordsys: str | None = None, p: Principal = admin) -> dict:
         cs = _cs(coordsys)
-        return {**_out(mgr().get_place(uid), cs), "coordsys": cs.value}
+        return {**_out(mgr().get_place(uid, regions=p.regions), cs), "coordsys": cs.value}
 
     @app.post("/v1/admin/places", status_code=201, tags=["admin"])
     def admin_create_place(body: PlaceIn, coordsys: str | None = None, p: Principal = admin) -> dict:
         cs = _cs(body.coordsys or coordsys)
         data = {"coordsys": cs.value, **body.to_data(partial=False)}  # 查询参数里的 coordsys 也作用于输入
-        return {**_out(mgr().create_place(data, actor=p.name), cs), "coordsys": cs.value}
+        return {**_out(mgr().create_place(data, actor=p.name, regions=p.regions), cs), "coordsys": cs.value}
 
     @app.patch("/v1/admin/places/{uid}", tags=["admin"])
     def admin_update_place(uid: str, body: PlaceIn, coordsys: str | None = None, p: Principal = admin) -> dict:
@@ -315,38 +374,39 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         if not data:
             raise HTTPException(400, "没有要修改的字段")
         data["coordsys"] = cs.value
-        return {**_out(mgr().update_place(uid, data, actor=p.name), cs), "coordsys": cs.value}
+        return {**_out(mgr().update_place(uid, data, actor=p.name, regions=p.regions), cs), "coordsys": cs.value}
 
     @app.delete("/v1/admin/places/{uid}", tags=["admin"])
     def admin_delete_place(uid: str, p: Principal = admin) -> dict:
-        return {"deleted": mgr().delete_place(uid, actor=p.name)}
+        return {"deleted": mgr().delete_place(uid, actor=p.name, regions=p.regions)}
 
     @app.get("/v1/admin/memory", tags=["admin"])
     def admin_memory(q: str | None = Query(None, max_length=200), offset: int = Query(0, ge=0),
                      limit: int = Query(20, ge=1, le=200), coordsys: str | None = None,
-                     _p: Principal = admin) -> dict:
+                     p: Principal = admin) -> dict:
         cs = _cs(coordsys)
-        return {**_out(mgr().list_memory(q, offset, limit), cs), "coordsys": cs.value}
+        return {**_out(mgr().list_memory(q, offset, limit, regions=p.regions), cs), "coordsys": cs.value}
 
     @app.post("/v1/admin/memory", status_code=201, tags=["admin"])
     def admin_add_memory(body: MemoryIn, p: Principal = admin) -> dict:
         cs = _cs(body.coordsys)
         lng, lat = _location(body.location)
         rows = mgr().add_memory(body.address, lng, lat, coordsys=cs.value, count=body.count, spread=body.spread,
-                                actor=p.name)
+                                actor=p.name, regions=p.regions)
         return {"items": _out(rows, cs), "coordsys": cs.value}
 
     @app.delete("/v1/admin/memory", tags=["admin"])
     def admin_delete_memory(key: str = Query(..., min_length=1), p: Principal = admin) -> dict:
-        return {"deleted": mgr().delete_memory(key, actor=p.name)}
+        return {"deleted": mgr().delete_memory(key, actor=p.name, regions=p.regions)}
 
     @app.get("/v1/admin/review", tags=["admin"])
     def admin_review(source: Literal["review", "feedback"] | None = None,
                      status: Literal["pending", "approved", "dismissed", "all"] = "pending",
                      offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=200),
-                     coordsys: str | None = None, _p: Principal = admin) -> dict:
+                     coordsys: str | None = None, p: Principal = admin) -> dict:
         cs = _cs(coordsys)
-        return {**_out(mgr().review_items(source, status, offset, limit), cs), "coordsys": cs.value}
+        res = mgr().review_items(source, status, offset, limit, regions=p.regions)
+        return {**_out(res, cs), "coordsys": cs.value}
 
     @app.post("/v1/admin/review/{item_id}", tags=["admin"])
     def admin_resolve(item_id: str, body: ReviewAction, p: Principal = admin) -> dict:
@@ -354,7 +414,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         lng = lat = None
         if body.location:
             lng, lat = _location(body.location)
-        return _out(mgr().resolve_review(item_id, body.action, lng, lat, coordsys=cs.value, actor=p.name), cs)
+        return _out(mgr().resolve_review(item_id, body.action, lng, lat, coordsys=cs.value, actor=p.name,
+                                            regions=p.regions), cs)
 
     @app.get("/v1/admin/regions", tags=["admin"])
     def admin_regions(q: str = Query(..., min_length=1, max_length=50), limit: int = Query(20, ge=1, le=100),
@@ -363,18 +424,19 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
 
     @app.get("/v1/admin/changes", tags=["admin"])
     def admin_changes(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500), op: str | None = None,
-                      _p: Principal = admin) -> dict:
-        return mgr().list_changes(offset, limit, op)
+                      p: Principal = admin) -> dict:
+        """区域管理员只能看到自己的修改。"""
+        return mgr().list_changes(offset, limit, op, actor=p.name if p.scoped else None)
 
     @app.get("/v1/admin/changes/export", tags=["admin"])
-    def admin_export(_p: Principal = admin) -> StreamingResponse:
+    def admin_export(_p: Principal = root) -> StreamingResponse:
         """全部变更日志（JSONL），下次建库时 cngeocoder build ... --edits <文件> 重放。"""
         name = f"edits-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
         return StreamingResponse(mgr().export_changes(), media_type="application/x-ndjson",
                                  headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.get("/v1/admin/auth", tags=["admin"])
-    def admin_auth(_p: Principal = admin) -> dict:
+    def admin_auth(_p: Principal = root) -> dict:
         """密钥配置概况与调用计数（不含密钥本身）。"""
         return ring.describe()
 
@@ -392,14 +454,13 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     allowed_origins = {o.strip() for o in (cfg.mcp_origins or "").split(",") if o.strip()}
 
     @app.post("/mcp", tags=["mcp"])
-    async def mcp_post(request: Request, _b=Depends(_bearer), _k=Depends(_api_key)) -> Response:
+    async def mcp_post(request: Request, p: Principal = read) -> Response:
         """MCP Streamable HTTP 入口（JSON-RPC 2.0）。工具列表按调用方角色过滤。"""
         origin = request.headers.get("origin")
         if origin and "*" not in allowed_origins and origin not in allowed_origins \
                 and urlparse(origin).netloc != request.headers.get("host"):
             # 防 DNS 重绑定：浏览器发起的跨源请求默认拒绝
             raise HTTPException(403, f"Origin 不在允许列表: {origin}（GEOCODER_MCP_ORIGINS）")
-        p = await run_in_threadpool(_principal, request, "read")
         try:
             payload = json.loads(await request.body())
         except (json.JSONDecodeError, UnicodeDecodeError):

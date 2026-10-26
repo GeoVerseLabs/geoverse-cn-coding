@@ -7,7 +7,7 @@
 | 方式 | 地址 / 命令 | 鉴权 | 适合 |
 |---|---|---|---|
 | HTTP（Streamable HTTP） | `POST http://<host>:8000/mcp` | 与 HTTP API 相同的 API Key | 共享的服务实例、远程 agent |
-| stdio | `cngeocoder --db <数据文件> mcp --role read\|admin` | 由启动参数决定（本机进程，信任边界是操作系统用户） | 本机 agent 直接读写数据文件 |
+| stdio | `cngeocoder --db <数据文件> mcp --role read\|admin` | 设置 `GEOCODER_API_KEY` 时按密钥配置（角色、数据范围、兜底权限，与 HTTP 一致）；否则由 `--role` 决定（信任边界是操作系统用户） | 本机 agent 直接读写数据文件 |
 
 Claude Code：
 
@@ -38,6 +38,13 @@ HTTP 方式说明：
 - 浏览器发起的跨源请求默认拒绝（防 DNS 重绑定），需要时用 `GEOCODER_MCP_ORIGINS` 放开；
 - 每次 MCP 请求按一次 HTTP 请求计入限流。
 
+stdio 方式要与 HTTP 使用同一套权限时，在启动环境里设置 `GEOCODER_API_KEY=<密钥>` 和 `GEOCODER_API_KEYS_FILE`（或 `GEOCODER_API_KEYS`），变更记录里的操作人为密钥名称：
+
+```json
+{"mcpServers": {"cngeocoder": {"command": "cngeocoder", "args": ["--db", "/data/geocoder.db", "mcp"],
+  "env": {"GEOCODER_API_KEY": "cng_xxx", "GEOCODER_API_KEYS_FILE": "/etc/cngeocoder/keys.json"}}}}
+```
+
 stdio 方式下 admin 角色会以可写方式打开数据文件（`--no-editable` 关闭）。如果同一个文件同时被在线服务使用，在线服务也要开启 `GEOCODER_EDITABLE=1`（见 [admin.md](admin.md) 第 3 节）。
 
 ## 2. 工具
@@ -63,7 +70,7 @@ stdio 方式下 admin 角色会以可写方式打开数据文件（`--no-editabl
 | `list_review` · `resolve_review` | 待审核队列 |
 | `list_changes` | 变更记录 |
 
-工具列表按调用方角色过滤：read 密钥看不到维护工具。工具带 `readOnlyHint` / `destructiveHint` 标注，客户端可据此决定是否需要人工确认。所有坐标参数都有 `coordsys`。
+工具列表按调用方角色过滤：read 密钥看不到维护工具；带数据范围的密钥只能读写范围内的数据（`get_service_info` 的 `caller.regions` 可查）；不允许兜底的密钥，`geocode` 的 `fallback` 参数不生效。工具带 `readOnlyHint` / `destructiveHint` 标注，客户端可据此决定是否需要人工确认。所有坐标参数都有 `coordsys`。
 
 工具出错（参数不合法、要素不存在、只读模式等）时返回 `isError: true` 和中文说明，agent 可以据此修正后重试。新增 / 修改要素时，区划编码与坐标矛盾会在结果的 `warnings` 里提示。
 

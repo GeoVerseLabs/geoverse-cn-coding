@@ -103,13 +103,32 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def _stdio_principal(args):
+    """stdio 调用方。设置了 GEOCODER_API_KEY 时按密钥配置确定角色、数据范围和兜底权限（与 HTTP 一致），
+    否则按 --role（信任边界是启动它的操作系统用户）。"""
+    from .auth import KeyRing, Principal
+    from .engine import Settings
+
+    token = os.environ.get("GEOCODER_API_KEY")
+    if not token:
+        return Principal(name=args.name, role=args.role)
+    ring = KeyRing.from_settings(Settings.from_env())
+    key = ring.verify(token)
+    if key is None:
+        raise SystemExit("GEOCODER_API_KEY 不在 GEOCODER_API_KEYS / GEOCODER_API_KEYS_FILE 配置的密钥里")
+    p = ring.principal_for(key)
+    if p.role == "write":
+        p.role = "read"  # MCP 没有反馈工具，write 等同 read
+    return p
+
+
 def cmd_mcp(args) -> int:
-    from .auth import Principal
     from .mcp_server import McpServer, serve_stdio
 
-    # stdio 由本机 agent 以子进程启动，信任边界是操作系统用户，角色由启动参数决定
-    eng = _engine(args, editable=True if args.role == "admin" and args.editable else None)
-    serve_stdio(McpServer(eng), Principal(name=args.name, role=args.role))
+    p = _stdio_principal(args)
+    eng = _engine(args, editable=True if p.role == "admin" and args.editable else None)
+    print(f"MCP stdio: {p.name}（{p.role}{'，范围 ' + ','.join(p.regions) if p.regions else ''}）", file=sys.stderr)
+    serve_stdio(McpServer(eng), p)
     return 0
 
 
@@ -203,7 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(func=cmd_serve)
 
     m = sub.add_parser("mcp", help="以 stdio 方式提供 MCP 服务（供本机 agent 以子进程启动）")
-    m.add_argument("--role", choices=["read", "admin"], default="read", help="agent 的角色：read 只读查询，admin 可维护数据")
+    m.add_argument("--role", choices=["read", "admin"], default="read",
+                   help="agent 的角色：read 只读查询，admin 可维护数据（设置了 GEOCODER_API_KEY 时以密钥配置为准）")
     m.add_argument("--name", default="mcp-stdio", help="变更日志里记录的操作人")
     m.add_argument("--editable", action=argparse.BooleanOptionalAction, default=True,
                    help="admin 角色时以可写方式打开数据文件（默认开启）")

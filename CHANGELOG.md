@@ -13,6 +13,15 @@
 - 要素稳定标识 `uid`：输入可显式给出，否则按来源与内容生成，同样的输入每次建库不变。
 - 鉴权：API Key（`GEOCODER_API_KEYS` / `GEOCODER_API_KEYS_FILE`，支持只存 SHA-256），read / write / admin 三级角色，按调用方限流（`GEOCODER_RATE_LIMIT`、密钥级 `rpm`），错误密钥节流，`/v1/auth/whoami`，`cngeocoder keygen`。
 - MCP：`POST /mcp`（Streamable HTTP，无状态）与 `cngeocoder mcp`（stdio），6 个查询工具 + 11 个数据维护工具，按角色开放。
+- 鉴权补充：
+  - 每个接口声明所需角色并写入 OpenAPI（`x-required-role`），测试逐个检查无遗漏；鉴权先于参数与请求体解析；
+  - 数据范围：密钥可限定区划（`regions`），管理界面、管理 API、MCP 统一按范围过滤读取、拦截写入；
+  - 兜底权限：密钥可禁止触发兜底（`fallback: false`），配置密钥后匿名调用方不触发兜底；
+  - 批量接口按条数计入限流；
+  - 密钥文件热加载（约 5 秒），吊销不用重启；
+  - 拒绝事件记 WARNING 日志，管理界面显示各密钥被拒次数；
+  - `/v1/meta` 只向不限范围的管理员返回服务器文件路径；
+  - stdio MCP 可用 `GEOCODER_API_KEY` 按密钥配置确定权限。
 
 ### 变更
 - 没有配置 API Key 时行为不变（查询与反馈开放）；配置后默认所有接口都要带密钥（`GEOCODER_ANONYMOUS_ROLE` 可调整）。

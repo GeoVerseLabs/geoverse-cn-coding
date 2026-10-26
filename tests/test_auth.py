@@ -78,7 +78,8 @@ def test_roles(secured):
     assert c.get("/v1/admin/places", headers=h(WRITE_KEY)).status_code == 403
     assert c.get("/v1/admin/places", headers=h(ADMIN_KEY)).status_code == 200
     me = c.get("/v1/auth/whoami", headers=h(ADMIN_KEY)).json()
-    assert me == {"name": "ops", "role": "admin", "anonymous": False, "auth_enabled": True}
+    assert me == {"name": "ops", "role": "admin", "anonymous": False, "auth_enabled": True, "regions": None,
+                  "fallback": True}
     assert c.get("/v1/auth/whoami").json()["role"] == "none"
     usage = c.get("/v1/admin/auth", headers=h(ADMIN_KEY)).json()
     assert {k["name"]: k["requests"] for k in usage["keys"]}["app"] >= 2

@@ -133,9 +133,10 @@ pre { background: var(--code); padding: 10px; border-radius: 6px; overflow: auto
   <section data-view="overview">
     <div class="panel"><h2>数据</h2><div id="stats" class="grid"></div></div>
     <div class="panel"><h2>服务</h2><dl id="serviceInfo" class="kv"></dl></div>
-    <div class="panel"><h2>API Key</h2>
-      <p class="muted">密钥通过 <code>GEOCODER_API_KEYS</code> / <code>GEOCODER_API_KEYS_FILE</code> 配置，用 <code>cngeocoder keygen</code> 生成。这里只显示名称、角色与本进程的调用计数。</p>
-      <table><thead><tr><th>名称</th><th>角色</th><th>密钥摘要</th><th class="num">每分钟上限</th><th class="num">请求数</th></tr></thead>
+    <div class="panel" id="keysPanel"><h2>API Key</h2>
+      <p class="muted">密钥通过 <code>GEOCODER_API_KEYS</code> / <code>GEOCODER_API_KEYS_FILE</code> 配置，用 <code>cngeocoder keygen</code> 生成；密钥文件修改后约 5 秒自动生效。这里只显示名称、权限与本进程的调用计数。</p>
+      <table><thead><tr><th>名称</th><th>角色</th><th>数据范围</th><th>兜底</th><th class="wide-only">密钥摘要</th>
+        <th class="num">每分钟上限</th><th class="num">请求数</th><th class="num">被拒</th></tr></thead>
         <tbody id="keysBody"></tbody></table>
     </div>
     <div class="panel"><h2>MCP 接入</h2>
@@ -333,7 +334,8 @@ async function login(key) {
   if (me.role !== "admin") throw new Error(`该密钥的角色是 ${me.role}，数据管理需要 admin`);
   state.me = me; store("cng_key", key);
   $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
-  $("#who").textContent = me.name;
+  $("#who").textContent = me.name + (me.regions ? `（范围 ${me.regions.join("、")}）` : "");
+  $("#exportChanges").classList.toggle("hidden", !!me.regions);
   await refreshOverview();
   show(location.hash.slice(1) || "overview");
 }
@@ -379,18 +381,27 @@ async function refreshOverview() {
   const pending = d.review.pending;
   $("#reviewBadge").textContent = pending; $("#reviewBadge").classList.toggle("hidden", !pending);
   const fb = d.fallback ? `已开启（熔断 ${esc(d.fallback.breaker)}，今日 ${esc(d.fallback.quota_used)} / ${esc(d.fallback.quota_limit)}）` : "未开启";
-  const kv = [["数据文件", d.db], ["建库时间", d.built_at], ["表结构版本", d.schema_version], ["编辑版本", d.edit_version],
+  const scope = d.whoami.regions ? `仅 ${d.whoami.regions.join("、")}（区域管理员：只能查看和修改范围内的数据）` : "全国";
+  const kv = [["当前密钥", `${d.whoami.name} · ${scope}`], ...(d.db ? [["数据文件", d.db]] : []), ["建库时间", d.built_at], ["表结构版本", d.schema_version], ["编辑版本", d.edit_version],
     ["在线编辑", d.editable ? "开启" : "关闭（只读）"], ["兜底服务", fb],
     ["缓存", `正向 ${d.cache.geocode.size} 条（命中 ${d.cache.geocode.hits}），逆向 ${d.cache.reverse.size} 条`],
     ["待审核来源", `兜底结果 ${d.review.review ? "已配置" : "未配置"}，业务反馈 ${d.review.feedback ? "已配置" : "未配置"}`],
-    ["匿名访问", d.auth.anonymous_role === "none" ? "禁止" : `允许（${d.auth.anonymous_role}）`],
-    ["全局限流", d.auth.rate_limit ? d.auth.rate_limit + " 次/分钟" : "不限"]];
+    ...(d.auth ? [["匿名访问", d.auth.anonymous_role === "none" ? "禁止" : `允许（${d.auth.anonymous_role}）`],
+                  ["全局限流", d.auth.rate_limit ? d.auth.rate_limit + " 次/分钟（批量接口按条数计）" : "不限"]] : [])];
   $("#serviceInfo").innerHTML = kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
-  $("#keysBody").innerHTML = d.auth.keys.map(k => `<tr><td>${esc(k.name)}${k.name === state.me.name ? ' <span class="badge accent">当前</span>' : ""}</td>
-    <td><span class="badge ${k.role === "admin" ? "danger" : k.role === "write" ? "warn" : ""}">${esc(k.role)}</span></td>
-    <td class="mono">${esc(k.key_hint)}…</td><td class="num">${esc(k.rpm ?? (d.auth.rate_limit || "不限"))}</td>
-    <td class="num">${esc(k.requests)}</td></tr>`).join("") +
-    `<tr><td class="muted">匿名</td><td>${esc(d.auth.anonymous_role)}</td><td></td><td></td><td class="num">${esc(d.auth.anonymous_requests)}</td></tr>`;
+  $("#keysPanel").classList.toggle("hidden", !d.auth);  // 区域管理员看不到密钥配置
+  if (d.auth) {
+    const denied = d.auth.denied || {};
+    $("#keysBody").innerHTML = d.auth.keys.map(k => `<tr><td>${esc(k.name)}${k.name === state.me.name ? ' <span class="badge accent">当前</span>' : ""}</td>
+      <td><span class="badge ${k.role === "admin" ? "danger" : k.role === "write" ? "warn" : ""}">${esc(k.role)}</span></td>
+      <td>${k.regions ? esc(k.regions.join("、")) : '<span class="muted">全国</span>'}</td>
+      <td>${k.fallback ? "允许" : '<span class="muted">禁止</span>'}</td>
+      <td class="mono wide-only">${esc(k.key_hint)}…</td><td class="num">${esc(k.rpm ?? (d.auth.rate_limit || "不限"))}</td>
+      <td class="num">${esc(k.requests)}</td><td class="num">${esc(denied[k.name] || 0)}</td></tr>`).join("") +
+      `<tr><td class="muted">匿名</td><td>${esc(d.auth.anonymous_role)}</td><td></td><td></td><td class="wide-only"></td><td></td>
+       <td class="num">${esc(d.auth.anonymous_requests)}</td><td class="num">${esc(denied.anonymous || 0)}</td></tr>` +
+      `<tr><td class="muted">错误密钥</td><td colspan="6"></td><td class="num">${esc(denied.invalid_key || 0)}</td></tr>`;
+  }
   const base = location.origin;
   $("#mcpSnippet").textContent =
 `# HTTP（远程服务）
